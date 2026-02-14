@@ -193,6 +193,35 @@ namespace MediaBrowser.Controller.MediaEncoding
             CancellationToken cancellationToken);
 
         /// <summary>
+        /// Generates an HLS I-frame playlist with fMP4 segments for Apple HLS compliance.
+        /// Per Apple HLS spec 6.19, visionOS uses 160px height thumbnails for scrubbing.
+        /// </summary>
+        /// <param name="inputFile">Input file.</param>
+        /// <param name="container">Video container type.</param>
+        /// <param name="mediaSource">Media source information.</param>
+        /// <param name="videoStream">Media stream information.</param>
+        /// <param name="targetHeight">Target height for I-frame thumbnails.</param>
+        /// <param name="allowHwAccel">Allow for hardware acceleration.</param>
+        /// <param name="enableHwEncoding">Use hardware H.264 encoder.</param>
+        /// <param name="threads">The input/output thread count for ffmpeg.</param>
+        /// <param name="priority">The process priority for the ffmpeg process.</param>
+        /// <param name="encodingHelper">EncodingHelper instance.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns>Directory where I-frame playlist and segments were created.</returns>
+        Task<string> GenerateIFrameHlsPlaylistAsync(
+            string inputFile,
+            string container,
+            MediaSourceInfo mediaSource,
+            MediaStream videoStream,
+            int targetHeight,
+            bool allowHwAccel,
+            bool enableHwEncoding,
+            int? threads,
+            ProcessPriorityClass? priority,
+            EncodingHelper encodingHelper,
+            CancellationToken cancellationToken);
+
+        /// <summary>
         /// Gets the media info.
         /// </summary>
         /// <param name="request">The request.</param>

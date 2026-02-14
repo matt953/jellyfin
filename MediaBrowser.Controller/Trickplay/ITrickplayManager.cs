@@ -111,4 +111,52 @@ public interface ITrickplayManager
     /// <param name="apiKey">Optional api key of the requesting user.</param>
     /// <returns>The text content of the .m3u8 playlist.</returns>
     Task<string?> GetHlsPlaylist(Guid itemId, int width, string? apiKey);
+
+    /// <summary>
+    /// Gets the I-frame playlist info for an item.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <returns>The I-frame playlist info, or null if not available.</returns>
+    Task<IFramePlaylistInfo?> GetIFramePlaylistInfoAsync(Guid itemId);
+
+    /// <summary>
+    /// Gets the I-frame HLS playlist with authenticated segment URLs.
+    /// </summary>
+    /// <param name="item">The item.</param>
+    /// <param name="saveWithMedia">Whether trickplay is saved alongside media.</param>
+    /// <param name="mediaSourceId">The media source id.</param>
+    /// <param name="apiKey">Optional api key of the requesting user.</param>
+    /// <returns>The text content of the iframe.m3u8 playlist with auth tokens, or null if not available.</returns>
+    Task<string?> GetIFrameHlsPlaylist(BaseItem item, bool saveWithMedia, Guid mediaSourceId, string? apiKey);
+
+    /// <summary>
+    /// Gets the path to the I-frame playlist file.
+    /// </summary>
+    /// <param name="item">The item.</param>
+    /// <param name="saveWithMedia">Whether trickplay is saved alongside media.</param>
+    /// <returns>The path to the iframe.m3u8 file, or null if not available.</returns>
+    string? GetIFramePlaylistPath(BaseItem item, bool saveWithMedia);
+
+    /// <summary>
+    /// Gets the I-frame playlist directory.
+    /// </summary>
+    /// <param name="item">The item.</param>
+    /// <param name="saveWithMedia">Whether trickplay is saved alongside media.</param>
+    /// <returns>The directory containing I-frame playlist and segments, or null if not available.</returns>
+    string? GetIFrameDirectory(BaseItem item, bool saveWithMedia);
+
+    /// <summary>
+    /// Saves I-frame playlist info.
+    /// </summary>
+    /// <param name="info">The I-frame playlist info.</param>
+    /// <returns>Task.</returns>
+    Task SaveIFramePlaylistInfo(IFramePlaylistInfo info);
+
+    /// <summary>
+    /// Deletes I-frame playlist data for an item.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Task.</returns>
+    Task DeleteIFramePlaylistDataAsync(Guid itemId, CancellationToken cancellationToken);
 }

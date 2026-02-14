@@ -1107,6 +1107,239 @@ namespace MediaBrowser.MediaEncoding.Encoder
             }
         }
 
+        /// <inheritdoc />
+        public async Task<string> GenerateIFrameHlsPlaylistAsync(
+            string inputFile,
+            string container,
+            MediaSourceInfo mediaSource,
+            MediaStream videoStream,
+            int targetHeight,
+            bool allowHwAccel,
+            bool enableHwEncoding,
+            int? threads,
+            ProcessPriorityClass? priority,
+            EncodingHelper encodingHelper,
+            CancellationToken cancellationToken)
+        {
+            var options = allowHwAccel ? _configurationManager.GetEncodingOptions() : new EncodingOptions();
+            threads ??= _threads;
+
+            // Check if keyframe-only decoding is supported for hardware acceleration
+            if (allowHwAccel)
+            {
+                var hardwareAccelerationType = options.HardwareAccelerationType;
+                var supportsKeyFrameOnly = (hardwareAccelerationType == HardwareAccelerationType.nvenc && options.EnableEnhancedNvdecDecoder)
+                                           || (hardwareAccelerationType == HardwareAccelerationType.amf && OperatingSystem.IsWindows())
+                                           || (hardwareAccelerationType == HardwareAccelerationType.qsv && options.PreferSystemNativeHwDecoder)
+                                           || hardwareAccelerationType == HardwareAccelerationType.vaapi
+                                           || hardwareAccelerationType == HardwareAccelerationType.videotoolbox
+                                           || hardwareAccelerationType == HardwareAccelerationType.rkmpp;
+                if (!supportsKeyFrameOnly)
+                {
+                    allowHwAccel = false;
+                    options = new EncodingOptions();
+                }
+            }
+
+            if (!allowHwAccel)
+            {
+                options.EnableHardwareEncoding = false;
+                options.HardwareAccelerationType = HardwareAccelerationType.none;
+                options.EnableTonemapping = false;
+            }
+
+            // Recalculate dimensions if needed (same as trickplay)
+            if (videoStream.Width is not null && videoStream.Height is not null && !string.IsNullOrEmpty(videoStream.AspectRatio))
+            {
+                var darParts = videoStream.AspectRatio.Split(':');
+                var (wa, ha) = (double.Parse(darParts[0], CultureInfo.InvariantCulture), double.Parse(darParts[1], CultureInfo.InvariantCulture));
+                var shouldResetHeight = Math.Abs((videoStream.Width.Value * ha) - (videoStream.Height.Value * wa)) > .05;
+                if (shouldResetHeight)
+                {
+                    videoStream.Height = Convert.ToInt32(videoStream.Width.Value * ha / wa);
+                }
+            }
+
+            // Create job state for H.264 output (not MJPEG like trickplay)
+            var baseRequest = new BaseEncodingJobOptions { MaxHeight = targetHeight, MaxFramerate = 1.0f };
+            var jobState = new EncodingJobInfo(TranscodingJobType.Progressive)
+            {
+                IsVideoRequest = true,
+                MediaSource = mediaSource,
+                VideoStream = videoStream,
+                BaseRequest = baseRequest,
+                MediaPath = inputFile,
+                OutputVideoCodec = "h264"
+            };
+
+            // Get H.264 encoder (use hardware if available)
+            var vidEncoder = enableHwEncoding ? encodingHelper.GetH264Encoder(jobState, options) : "libx264";
+
+            // Get input and filter arguments
+            var inputArg = encodingHelper.GetInputArgument(jobState, options, container).Trim();
+            if (string.IsNullOrWhiteSpace(inputArg))
+            {
+                throw new InvalidOperationException("EncodingHelper returned empty input arguments.");
+            }
+
+            if (!allowHwAccel)
+            {
+                inputArg = "-threads " + threads + " " + inputArg;
+            }
+
+            if (options.HardwareAccelerationType == HardwareAccelerationType.videotoolbox && _isLowPriorityHwDecodeSupported)
+            {
+                inputArg = "-hwaccel_flags +low_priority " + inputArg;
+            }
+
+            // Add keyframe-only extraction
+            inputArg = "-skip_frame nokey " + inputArg;
+
+            var filterParam = encodingHelper.GetVideoProcessingFilterParam(jobState, options, vidEncoder).Trim();
+            if (string.IsNullOrWhiteSpace(filterParam))
+            {
+                throw new InvalidOperationException("EncodingHelper returned empty or invalid filter parameters.");
+            }
+
+            // Output directory
+            var targetDirectory = Path.Combine(_configurationManager.ApplicationPaths.TempDirectory, Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(targetDirectory);
+
+            // Build encoder-specific options
+            var encoderOptions = string.Empty;
+            if (vidEncoder.Contains("videotoolbox", StringComparison.OrdinalIgnoreCase))
+            {
+                encoderOptions = "-b:v 500k -qmin -1 -qmax -1 -allow_sw 1 -profile:v high -level 4.0 ";
+            }
+            else if (vidEncoder.Contains("nvenc", StringComparison.OrdinalIgnoreCase))
+            {
+                encoderOptions = "-b:v 500k -maxrate 500k -bufsize 1000k -profile:v high -level 4.0 ";
+            }
+            else if (vidEncoder.Contains("qsv", StringComparison.OrdinalIgnoreCase))
+            {
+                encoderOptions = "-b:v 1000k -maxrate 1001k -bufsize 4000k -profile:v high -level 40 ";
+            }
+            else if (vidEncoder.Contains("vaapi", StringComparison.OrdinalIgnoreCase))
+            {
+                encoderOptions = "-rc_mode VBR -b:v 500k -maxrate 500k -bufsize 1000k -profile:v high -level 40 ";
+            }
+            else
+            {
+                // Software encoder (libx264)
+                encoderOptions = "-profile:v high -level 4.0 -preset fast ";
+            }
+
+            // HLS I-frame arguments with fMP4 segments
+            var args = string.Format(
+                CultureInfo.InvariantCulture,
+                "-loglevel error {0} -an -sn {1} -threads {2} -c:v {3} -g 1 -keyint_min 1 {4}" +
+                "-f hls -hls_segment_type fmp4 -hls_playlist_type vod " +
+                "-hls_flags independent_segments+iframes_only " +
+                "-hls_time 1 -hls_list_size 0 " +
+                "-hls_fmp4_init_filename \"init.mp4\" " +
+                "-hls_segment_filename \"{5}/segment_%05d.m4s\" " +
+                "\"{5}/iframe.m3u8\"",
+                inputArg,
+                filterParam,
+                threads.GetValueOrDefault(_threads),
+                vidEncoder,
+                encoderOptions,
+                targetDirectory);
+
+            // Start ffmpeg process
+            var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    FileName = _ffmpegPath,
+                    Arguments = args,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    ErrorDialog = false,
+                },
+                EnableRaisingEvents = true
+            };
+
+            var processDescription = string.Format(CultureInfo.InvariantCulture, "{0} {1}", process.StartInfo.FileName, process.StartInfo.Arguments);
+            _logger.LogInformation("I-frame playlist generation: {ProcessDescription}", processDescription);
+
+            using (var processWrapper = new ProcessWrapper(process, this))
+            {
+                bool ranToCompletion = false;
+
+                using (await _thumbnailResourcePool.LockAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    StartProcess(processWrapper);
+
+                    if (priority.HasValue)
+                    {
+                        try
+                        {
+                            processWrapper.Process.PriorityClass = priority.Value;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogDebug(ex, "Unable to set process priority to {Priority} for {Description}", priority.Value, processDescription);
+                        }
+                    }
+
+                    // Monitor progress by checking for new segments
+                    bool isResponsive = true;
+                    int lastCount = 0;
+                    var timeoutMs = _configurationManager.Configuration.ImageExtractionTimeoutMs;
+                    timeoutMs = timeoutMs <= 0 ? DefaultHdrImageExtractionTimeout : timeoutMs;
+
+                    while (isResponsive && !cancellationToken.IsCancellationRequested)
+                    {
+                        try
+                        {
+                            await process.WaitForExitAsync(TimeSpan.FromMilliseconds(timeoutMs)).ConfigureAwait(false);
+
+                            ranToCompletion = true;
+                            break;
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // Expected - check progress
+                        }
+
+                        var segmentCount = _fileSystem.GetFilePaths(targetDirectory).Count(f => f.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase));
+
+                        isResponsive = segmentCount > lastCount;
+                        lastCount = segmentCount;
+                    }
+
+                    if (!ranToCompletion)
+                    {
+                        if (!isResponsive)
+                        {
+                            _logger.LogInformation("I-frame playlist generation process unresponsive.");
+                        }
+
+                        _logger.LogInformation("Stopping I-frame playlist generation.");
+                        StopProcess(processWrapper, 1000);
+                    }
+                }
+
+                if (!ranToCompletion || processWrapper.ExitCode != 0)
+                {
+                    try
+                    {
+                        Directory.Delete(targetDirectory, true);
+                    }
+                    catch (Exception e)
+                    {
+                        _logger.LogError(e, "Failed to delete ffmpeg temp directory {TargetDirectory}", targetDirectory);
+                    }
+
+                    throw new FfmpegException(string.Format(CultureInfo.InvariantCulture, "ffmpeg I-frame playlist generation failed for {0}", processDescription));
+                }
+
+                return targetDirectory;
+            }
+        }
+
         public string GetTimeParameter(long ticks)
         {
             var time = TimeSpan.FromTicks(ticks);

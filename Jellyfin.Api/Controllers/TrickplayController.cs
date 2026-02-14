@@ -102,4 +102,79 @@ public class TrickplayController : BaseJellyfinApiController
 
         return NotFound();
     }
+
+    /// <summary>
+    /// Gets an HLS I-frame playlist for Apple device scrubbing.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="mediaSourceId">The media version id, if using an alternate version.</param>
+    /// <response code="200">I-frame playlist returned.</response>
+    /// <response code="404">I-frame playlist not found.</response>
+    /// <returns>A <see cref="FileResult"/> containing the I-frame playlist file.</returns>
+    [HttpGet("Videos/{itemId}/IFrame/iframe.m3u8")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesPlaylistFile]
+    public async Task<ActionResult> GetIFramePlaylist(
+        [FromRoute, Required] Guid itemId,
+        [FromQuery] Guid? mediaSourceId)
+    {
+        var item = _libraryManager.GetItemById<BaseItem>(mediaSourceId ?? itemId, User.GetUserId());
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        var saveWithMedia = _libraryManager.GetLibraryOptions(item).SaveTrickplayWithMedia;
+        string? playlist = await _trickplayManager.GetIFrameHlsPlaylist(item, saveWithMedia, mediaSourceId ?? itemId, User.GetToken()).ConfigureAwait(false);
+
+        if (string.IsNullOrEmpty(playlist))
+        {
+            return NotFound();
+        }
+
+        return Content(playlist, "application/vnd.apple.mpegurl");
+    }
+
+    /// <summary>
+    /// Gets an I-frame segment or init file.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="fileName">The segment file name.</param>
+    /// <param name="mediaSourceId">The media version id, if using an alternate version.</param>
+    /// <response code="200">I-frame segment returned.</response>
+    /// <response code="404">I-frame segment not found.</response>
+    /// <returns>A <see cref="FileResult"/> containing the I-frame segment.</returns>
+    [HttpGet("Videos/{itemId}/IFrame/{fileName}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult GetIFrameSegment(
+        [FromRoute, Required] Guid itemId,
+        [FromRoute, Required] string fileName,
+        [FromQuery] Guid? mediaSourceId)
+    {
+        var item = _libraryManager.GetItemById<BaseItem>(mediaSourceId ?? itemId, User.GetUserId());
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        var saveWithMedia = _libraryManager.GetLibraryOptions(item).SaveTrickplayWithMedia;
+        var dir = _trickplayManager.GetIFrameDirectory(item, saveWithMedia);
+        if (string.IsNullOrEmpty(dir))
+        {
+            return NotFound();
+        }
+
+        var path = System.IO.Path.Combine(dir, fileName);
+        if (!System.IO.File.Exists(path))
+        {
+            return NotFound();
+        }
+
+        var contentType = fileName.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
+            ? MimeTypes.GetMimeType("playlist.m3u8")
+            : "video/mp4";
+        return PhysicalFile(path, contentType);
+    }
 }

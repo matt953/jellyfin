@@ -318,6 +318,13 @@ public class DynamicHlsHelper
             var sourceId = Guid.Parse(state.Request.MediaSourceId);
             var trickplayResolutions = await _trickplayManager.GetTrickplayResolutions(sourceId).ConfigureAwait(false);
             AddTrickplay(state, trickplayResolutions, builder, _httpContextAccessor.HttpContext.User);
+
+            // Add I-frame playlist if available (Apple HLS-compliant for scrubbing)
+            var iframeInfo = await _trickplayManager.GetIFramePlaylistInfoAsync(sourceId).ConfigureAwait(false);
+            if (iframeInfo is not null)
+            {
+                AddIFramePlaylist(state, iframeInfo, builder, _httpContextAccessor.HttpContext.User);
+            }
         }
 
         return new FileContentResult(Encoding.UTF8.GetBytes(builder.ToString()), MimeTypes.GetMimeType("playlist.m3u8"));
@@ -664,6 +671,32 @@ public class DynamicHlsHelper
 
             builder.AppendLine();
         }
+    }
+
+    /// <summary>
+    /// Appends EXT-X-I-FRAME-STREAM-INF playlist for Apple HLS-compliant I-frame scrubbing.
+    /// </summary>
+    /// <param name="state">StreamState of the current stream.</param>
+    /// <param name="iframeInfo">I-frame playlist info.</param>
+    /// <param name="builder">StringBuilder to append the field to.</param>
+    /// <param name="user">Http user context.</param>
+    private void AddIFramePlaylist(StreamState state, IFramePlaylistInfo iframeInfo, StringBuilder builder, ClaimsPrincipal user)
+    {
+        var url = string.Format(
+            CultureInfo.InvariantCulture,
+            "IFrame/iframe.m3u8?MediaSourceId={0}&ApiKey={1}",
+            state.Request.MediaSourceId,
+            user.GetToken());
+
+        builder.AppendFormat(
+            CultureInfo.InvariantCulture,
+            "#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH={0},RESOLUTION={1}x{2},CODECS=\"avc1.640028\",URI=\"{3}\"",
+            iframeInfo.Bandwidth.ToString(CultureInfo.InvariantCulture),
+            iframeInfo.Width.ToString(CultureInfo.InvariantCulture),
+            iframeInfo.Height.ToString(CultureInfo.InvariantCulture),
+            url);
+
+        builder.AppendLine();
     }
 
     /// <summary>

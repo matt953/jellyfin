@@ -219,6 +219,17 @@ public class TrickplayManager : ITrickplayManager
                     }
                 }
             }
+
+            // Generate I-frame playlist if not disabled
+            if (!libraryOptions.DisableIFramePlaylistGeneration)
+            {
+                await GenerateIFramePlaylistAsync(
+                    video,
+                    options,
+                    saveWithMedia,
+                    replace,
+                    cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 
@@ -691,5 +702,274 @@ public class TrickplayManager : ITrickplayManager
                 .AnyAsync(i => i.Width == width)
                 .ConfigureAwait(false);
         }
+    }
+
+    private async Task GenerateIFramePlaylistAsync(
+        Video video,
+        TrickplayOptions options,
+        bool saveWithMedia,
+        bool replace,
+        CancellationToken cancellationToken)
+    {
+        // Per Apple HLS spec 6.19, we create a single playlist with 160px height thumbnails
+        // for scrubbing compatibility with all Apple platforms
+        const int TargetHeight = 160;
+
+        var mediaSource = video.GetMediaSources(false).FirstOrDefault(source => Guid.Parse(source.Id).Equals(video.Id));
+        if (mediaSource is null)
+        {
+            _logger.LogDebug("Found no matching media source for I-frame playlist generation for item {ItemId}", video.Id);
+            return;
+        }
+
+        var mediaPath = mediaSource.Path;
+        if (!File.Exists(mediaPath))
+        {
+            _logger.LogWarning("Media not found at {Path} for I-frame playlist generation {ItemID}", mediaPath, video.Id);
+            return;
+        }
+
+        var outputDir = GetIFrameDirectoryInternal(video, saveWithMedia);
+
+        // Check if I-frame playlist already exists
+        if (!replace && Directory.Exists(outputDir))
+        {
+            var playlistPath = Path.Combine(outputDir, "iframe.m3u8");
+            if (File.Exists(playlistPath))
+            {
+                var existingInfo = await GetIFramePlaylistInfoAsync(video.Id).ConfigureAwait(false);
+                if (existingInfo is not null)
+                {
+                    _logger.LogDebug("I-frame playlist already exists for {ItemId}", video.Id);
+                    return;
+                }
+            }
+        }
+
+        string? tempDir = null;
+        try
+        {
+            _logger.LogInformation("Creating I-frame playlist for {Path} [ID: {ItemId}]", mediaPath, video.Id);
+
+            tempDir = await _mediaEncoder.GenerateIFrameHlsPlaylistAsync(
+                mediaPath,
+                mediaSource.Container,
+                mediaSource,
+                mediaSource.VideoStream,
+                TargetHeight,
+                options.EnableHwAcceleration,
+                options.EnableHwEncoding,
+                options.ProcessThreads,
+                options.ProcessPriority,
+                _encodingHelper,
+                cancellationToken).ConfigureAwait(false);
+
+            if (string.IsNullOrEmpty(tempDir) || !Directory.Exists(tempDir))
+            {
+                throw new InvalidOperationException("Null or invalid directory from media encoder for I-frame playlist.");
+            }
+
+            // Move to output directory
+            Directory.CreateDirectory(Directory.GetParent(outputDir)!.FullName);
+            if (Directory.Exists(outputDir))
+            {
+                Directory.Delete(outputDir, true);
+            }
+
+            _fileSystem.MoveDirectory(tempDir, outputDir);
+            tempDir = null; // Prevent cleanup since we moved it
+
+            // Calculate and save metadata
+            var segmentFiles = Directory.GetFiles(outputDir, "*.m4s");
+            var segmentCount = segmentFiles.Length;
+
+            // Calculate peak bandwidth (bits per second) - HLS spec requires peak, not average
+            // Each segment is ~1 second, so peak bandwidth = largest segment size * 8 bits
+            var maxSegmentSize = segmentFiles.Length > 0 ? segmentFiles.Max(f => new FileInfo(f).Length) : 0;
+            var bandwidth = (int)Math.Ceiling((double)maxSegmentSize * 8);
+
+            // Calculate width from aspect ratio (height is fixed at 160)
+            var sourceWidth = mediaSource.VideoStream.Width ?? 0;
+            var sourceHeight = mediaSource.VideoStream.Height ?? 0;
+            var actualWidth = sourceHeight > 0
+                ? (int)Math.Ceiling((double)TargetHeight * sourceWidth / sourceHeight)
+                : 0;
+            // Ensure width is even (required for H.264)
+            actualWidth = 2 * (actualWidth / 2);
+
+            var iframeInfo = new IFramePlaylistInfo
+            {
+                ItemId = video.Id,
+                Width = actualWidth,
+                Height = TargetHeight,
+                SegmentCount = segmentCount,
+                Bandwidth = bandwidth
+            };
+
+            await SaveIFramePlaylistInfo(iframeInfo).ConfigureAwait(false);
+            _logger.LogInformation("Finished I-frame playlist for {Path}", mediaPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating I-frame playlist for {Path}", mediaPath);
+        }
+        finally
+        {
+            if (!string.IsNullOrEmpty(tempDir) && Directory.Exists(tempDir))
+            {
+                try
+                {
+                    Directory.Delete(tempDir, true);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to cleanup I-frame temp directory {Dir}", tempDir);
+                }
+            }
+        }
+    }
+
+    private string GetIFrameDirectoryInternal(Video video, bool saveWithMedia)
+    {
+        var trickplayPath = _pathManager.GetTrickplayDirectory(video, saveWithMedia);
+        return Path.Combine(trickplayPath, "iframe");
+    }
+
+    /// <inheritdoc />
+    public async Task<IFramePlaylistInfo?> GetIFramePlaylistInfoAsync(Guid itemId)
+    {
+        var dbContext = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
+        await using (dbContext.ConfigureAwait(false))
+        {
+            return await dbContext.IFramePlaylistInfos
+                .AsNoTracking()
+                .Where(i => i.ItemId.Equals(itemId))
+                .FirstOrDefaultAsync()
+                .ConfigureAwait(false);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<string?> GetIFrameHlsPlaylist(BaseItem item, bool saveWithMedia, Guid mediaSourceId, string? apiKey)
+    {
+        if (item is not Video video)
+        {
+            return null;
+        }
+
+        var playlistPath = Path.Combine(GetIFrameDirectoryInternal(video, saveWithMedia), "iframe.m3u8");
+        if (!File.Exists(playlistPath))
+        {
+            return null;
+        }
+
+        // Read the static playlist and add auth tokens to segment URLs
+        var content = await File.ReadAllTextAsync(playlistPath).ConfigureAwait(false);
+        var builder = new StringBuilder();
+        var lines = content.Split('\n');
+
+        foreach (var line in lines)
+        {
+            var trimmedLine = line.TrimEnd('\r');
+
+            // Check if this is a segment or init file reference (not a comment/directive)
+            if (!string.IsNullOrWhiteSpace(trimmedLine) && !trimmedLine.StartsWith('#'))
+            {
+                // This is a segment filename - add auth params
+                builder.AppendFormat(
+                    CultureInfo.InvariantCulture,
+                    "{0}?MediaSourceId={1}&ApiKey={2}",
+                    trimmedLine,
+                    mediaSourceId.ToString("N"),
+                    apiKey);
+                builder.AppendLine();
+            }
+            else if (trimmedLine.StartsWith("#EXT-X-MAP:URI=\"", StringComparison.Ordinal))
+            {
+                // Handle #EXT-X-MAP:URI="init.mp4" - add auth params
+                var uriStart = trimmedLine.IndexOf("URI=\"", StringComparison.Ordinal) + 5;
+                var uriEnd = trimmedLine.IndexOf('"', uriStart);
+                if (uriEnd > uriStart)
+                {
+                    var initFile = trimmedLine.Substring(uriStart, uriEnd - uriStart);
+                    builder.AppendFormat(
+                        CultureInfo.InvariantCulture,
+                        "#EXT-X-MAP:URI=\"{0}?MediaSourceId={1}&ApiKey={2}\"",
+                        initFile,
+                        mediaSourceId.ToString("N"),
+                        apiKey);
+                    builder.AppendLine();
+                }
+                else
+                {
+                    builder.AppendLine(trimmedLine);
+                }
+            }
+            else
+            {
+                builder.AppendLine(trimmedLine);
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    /// <inheritdoc />
+    public string? GetIFramePlaylistPath(BaseItem item, bool saveWithMedia)
+    {
+        if (item is not Video video)
+        {
+            return null;
+        }
+
+        var path = Path.Combine(GetIFrameDirectoryInternal(video, saveWithMedia), "iframe.m3u8");
+        if (File.Exists(path))
+        {
+            return path;
+        }
+
+        return null;
+    }
+
+    /// <inheritdoc />
+    public string? GetIFrameDirectory(BaseItem item, bool saveWithMedia)
+    {
+        if (item is not Video video)
+        {
+            return null;
+        }
+
+        var path = GetIFrameDirectoryInternal(video, saveWithMedia);
+        if (Directory.Exists(path))
+        {
+            return path;
+        }
+
+        return null;
+    }
+
+    /// <inheritdoc />
+    public async Task SaveIFramePlaylistInfo(IFramePlaylistInfo info)
+    {
+        var dbContext = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
+        await using (dbContext.ConfigureAwait(false))
+        {
+            var oldInfo = await dbContext.IFramePlaylistInfos.FindAsync(info.ItemId).ConfigureAwait(false);
+            if (oldInfo is not null)
+            {
+                dbContext.IFramePlaylistInfos.Remove(oldInfo);
+            }
+
+            dbContext.Add(info);
+
+            await dbContext.SaveChangesAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteIFramePlaylistDataAsync(Guid itemId, CancellationToken cancellationToken)
+    {
+        var dbContext = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await dbContext.IFramePlaylistInfos.Where(i => i.ItemId.Equals(itemId)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
     }
 }

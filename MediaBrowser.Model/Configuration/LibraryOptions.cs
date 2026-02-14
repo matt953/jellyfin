@@ -117,6 +117,13 @@ namespace MediaBrowser.Model.Configuration
         [DefaultValue(false)]
         public bool SaveTrickplayWithMedia { get; set; }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether to skip Apple HLS I-frame playlist generation.
+        /// When false (default), I-frame playlists are generated alongside trickplay tiles.
+        /// </summary>
+        [DefaultValue(false)]
+        public bool DisableIFramePlaylistGeneration { get; set; }
+
         public string[] DisabledLyricFetchers { get; set; }
 
         public string[] LyricFetcherOrder { get; set; }
