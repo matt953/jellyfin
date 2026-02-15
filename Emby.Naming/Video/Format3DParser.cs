@@ -75,7 +75,7 @@ namespace Emby.Naming.Video
                 }
             }
 
-            return is3D ? new Format3DResult(true, format3D) : _defaultResult;
+            return is3D ? new Format3DResult(true, format3D, rule.PrecedingToken) : _defaultResult;
         }
     }
 }

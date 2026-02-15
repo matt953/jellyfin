@@ -18,11 +18,12 @@ namespace Emby.Naming.Video
         /// <param name="extraType">Extra type.</param>
         /// <param name="extraRule">Extra rule.</param>
         /// <param name="format3D">Format 3D.</param>
+        /// <param name="format3DPrecedingToken">The preceding token for 3D format (e.g., "180" or "360").</param>
         /// <param name="is3D">Is 3D.</param>
         /// <param name="isStub">Is Stub.</param>
         /// <param name="stubType">Stub type.</param>
         /// <param name="isDirectory">Is directory.</param>
-        public VideoFileInfo(string name, string path, string? container, int? year = default, ExtraType? extraType = default, ExtraRule? extraRule = default, string? format3D = default, bool is3D = default, bool isStub = default, string? stubType = default, bool isDirectory = default)
+        public VideoFileInfo(string name, string path, string? container, int? year = default, ExtraType? extraType = default, ExtraRule? extraRule = default, string? format3D = default, string? format3DPrecedingToken = default, bool is3D = default, bool isStub = default, string? stubType = default, bool isDirectory = default)
         {
             Path = path;
             Container = container;
@@ -31,6 +32,7 @@ namespace Emby.Naming.Video
             ExtraType = extraType;
             ExtraRule = extraRule;
             Format3D = format3D;
+            Format3DPrecedingToken = format3DPrecedingToken;
             Is3D = is3D;
             IsStub = isStub;
             StubType = stubType;
@@ -78,6 +80,12 @@ namespace Emby.Naming.Video
         /// </summary>
         /// <value>The format3 d.</value>
         public string? Format3D { get; set; }
+
+        /// <summary>
+        /// Gets or sets the preceding token for 3D format (e.g., "180" or "360" for spatial video).
+        /// </summary>
+        /// <value>The preceding token, or null if none.</value>
+        public string? Format3DPrecedingToken { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether [is3 d].

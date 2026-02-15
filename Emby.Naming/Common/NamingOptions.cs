@@ -700,6 +700,29 @@ namespace Emby.Naming.Common
 
             Format3DRules =
             [
+                // Spatial/VR format rules (180°/360° video) - must be checked before standalone rules
+                new Format3DRule(
+                    precedingToken: "180",
+                    token: "sbs"),
+                new Format3DRule(
+                    precedingToken: "180",
+                    token: "ou"),
+                new Format3DRule(
+                    precedingToken: "180",
+                    token: "tb"),
+                new Format3DRule(
+                    precedingToken: "360",
+                    token: "sbs"),
+                new Format3DRule(
+                    precedingToken: "360",
+                    token: "ou"),
+                new Format3DRule(
+                    precedingToken: "360",
+                    token: "tb"),
+                new Format3DRule(
+                    precedingToken: "360",
+                    token: "mono"),
+
                 // Kodi rules:
                 new Format3DRule(
                     precedingToken: "3d",
@@ -717,7 +740,7 @@ namespace Emby.Naming.Common
                     precedingToken: "3d",
                     token: "tab"),
 
-                 // Media Browser rules:
+                 // Media Browser rules (standalone tokens):
                 new Format3DRule("fsbs"),
                 new Format3DRule("hsbs"),
                 new Format3DRule("sbs"),

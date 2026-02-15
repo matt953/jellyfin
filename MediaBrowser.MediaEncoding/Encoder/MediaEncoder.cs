@@ -703,13 +703,23 @@ namespace MediaBrowser.MediaEncoding.Encoder
             var scaler = threedFormat switch
             {
                 // hsbs crop width in half,scale to correct size, set the display aspect,crop out any black bars we may have made. Work out the correct height based on the display aspect it will maintain the aspect where -1 in this case (3d) may not.
-                Video3DFormat.HalfSideBySide => @"crop=iw/2:ih:0:0,scale=(iw*2):ih,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1",
+                Video3DFormat.HalfSideBySide => @"crop=iw/2:ih:0:0,format=yuvj420p,scale=(iw*2):ih,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1",
                 // fsbs crop width in half,set the display aspect,crop out any black bars we may have made
-                Video3DFormat.FullSideBySide => @"crop=iw/2:ih:0:0,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1",
+                Video3DFormat.FullSideBySide => @"crop=iw/2:ih:0:0,format=yuvj420p,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1",
                 // htab crop height in half,scale to correct size, set the display aspect,crop out any black bars we may have made
-                Video3DFormat.HalfTopAndBottom => @"crop=iw:ih/2:0:0,scale=(iw*2):ih),setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1",
+                Video3DFormat.HalfTopAndBottom => @"crop=iw:ih/2:0:0,format=yuvj420p,scale=iw:(ih*2),setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1",
                 // ftab crop height in half, set the display aspect,crop out any black bars we may have made
-                Video3DFormat.FullTopAndBottom => @"crop=iw:ih/2:0:0,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1",
+                Video3DFormat.FullTopAndBottom => @"crop=iw:ih/2:0:0,format=yuvj420p,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1",
+                // Stereo 180 SBS: crop left eye, convert to flat rectilinear, correct aspect ratio, crop to 16:9
+                Video3DFormat.Stereo180Sbs => @"crop=iw/2:ih:0:0,v360=hequirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,format=yuvj420p,scale=iw:iw,crop='min(iw,ih*16/9)':'min(ih,iw*9/16)',setsar=1",
+                // Stereo 180 OU: crop top eye, convert to flat rectilinear, correct aspect ratio, crop to 16:9
+                Video3DFormat.Stereo180Ou => @"crop=iw:ih/2:0:0,v360=hequirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,format=yuvj420p,scale=iw:iw,crop='min(iw,ih*16/9)':'min(ih,iw*9/16)',setsar=1",
+                // Stereo 360 SBS: crop left eye, convert to flat rectilinear, correct aspect ratio, crop to 16:9
+                Video3DFormat.Stereo360Sbs => @"crop=iw/2:ih:0:0,v360=equirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,format=yuvj420p,scale=iw:iw,crop='min(iw,ih*16/9)':'min(ih,iw*9/16)',setsar=1",
+                // Stereo 360 OU: crop top eye, convert to flat rectilinear, correct aspect ratio, crop to 16:9
+                Video3DFormat.Stereo360Ou => @"crop=iw:ih/2:0:0,v360=equirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,format=yuvj420p,scale=iw:iw,crop='min(iw,ih*16/9)':'min(ih,iw*9/16)',setsar=1",
+                // Mono 360: convert to flat rectilinear, correct aspect ratio, crop to 16:9
+                Video3DFormat.Mono360 => @"v360=equirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,format=yuvj420p,scale=iw:iw,crop='min(iw,ih*16/9)':'min(ih,iw*9/16)',setsar=1",
                 _ => "scale=round(iw*sar/2)*2:round(ih/2)*2"
             };
 
@@ -745,7 +755,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
             var mapArg = imageStreamIndex.HasValue ? (" -map 0:" + imageStreamIndex.Value.ToString(CultureInfo.InvariantCulture)) : string.Empty;
             var args = string.Format(
                 CultureInfo.InvariantCulture,
-                "-i {0}{1} -threads {2} -v quiet -vframes 1 -vf {3}{4}{5} -f image2 \"{6}\"",
+                "-i {0}{1} -threads {2} -v quiet -vframes 1 -vf \"{3}\"{4}{5} -f image2 \"{6}\"",
                 inputPath,
                 mapArg,
                 _threads,
@@ -888,7 +898,11 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 }
             }
 
-            var baseRequest = new BaseEncodingJobOptions { MaxWidth = maxWidth, MaxFramerate = (float)(1.0 / interval.TotalSeconds) };
+            // Use Width (not MaxWidth) for 3D/spatial formats to ensure crop filters are applied
+            // For non-3D content, continue using MaxWidth for flexible aspect-ratio-preserving scaling
+            var baseRequest = mediaSource.Video3DFormat.HasValue
+                ? new BaseEncodingJobOptions { Width = maxWidth, MaxFramerate = (float)(1.0 / interval.TotalSeconds) }
+                : new BaseEncodingJobOptions { MaxWidth = maxWidth, MaxFramerate = (float)(1.0 / interval.TotalSeconds) };
             var jobState = new EncodingJobInfo(TranscodingJobType.Progressive)
             {
                 IsVideoRequest = true,  // must be true for InputVideoHwaccelArgs to return non-empty value
@@ -1161,7 +1175,26 @@ namespace MediaBrowser.MediaEncoding.Encoder
             }
 
             // Create job state for H.264 output (not MJPEG like trickplay)
-            var baseRequest = new BaseEncodingJobOptions { MaxHeight = targetHeight, MaxFramerate = 1.0f };
+            // For 3D/spatial formats, use Width to ensure crop filters are applied
+            BaseEncodingJobOptions baseRequest;
+            if (mediaSource.Video3DFormat.HasValue)
+            {
+                // Calculate target width from height using effective aspect ratio after 3D transformation
+                var sourceWidth = videoStream.Width ?? 0;
+                var sourceHeight = videoStream.Height ?? 0;
+                var (effectiveWidth, effectiveHeight) = EncodingHelper.GetSpatialVideoSourceDimensions(
+                    sourceWidth, sourceHeight, mediaSource.Video3DFormat);
+                var targetWidth = effectiveHeight > 0
+                    ? (int)Math.Ceiling((double)targetHeight * effectiveWidth / effectiveHeight)
+                    : 0;
+                targetWidth = 2 * (targetWidth / 2); // Ensure even
+                baseRequest = new BaseEncodingJobOptions { Width = targetWidth, Height = targetHeight, MaxFramerate = 1.0f };
+            }
+            else
+            {
+                baseRequest = new BaseEncodingJobOptions { MaxHeight = targetHeight, MaxFramerate = 1.0f };
+            }
+
             var jobState = new EncodingJobInfo(TranscodingJobType.Progressive)
             {
                 IsVideoRequest = true,

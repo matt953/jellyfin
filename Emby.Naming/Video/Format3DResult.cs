@@ -10,10 +10,12 @@ namespace Emby.Naming.Video
         /// </summary>
         /// <param name="is3D">A value indicating whether the parsed string contains 3D tokens.</param>
         /// <param name="format3D">The 3D format. Value might be null if [is3D] is <c>false</c>.</param>
-        public Format3DResult(bool is3D, string? format3D)
+        /// <param name="precedingToken">The preceding token (e.g., "180" or "360" for spatial formats).</param>
+        public Format3DResult(bool is3D, string? format3D, string? precedingToken = null)
         {
             Is3D = is3D;
             Format3D = format3D;
+            PrecedingToken = precedingToken;
         }
 
         /// <summary>
@@ -27,5 +29,11 @@ namespace Emby.Naming.Video
         /// </summary>
         /// <value>The format3 d.</value>
         public string? Format3D { get; }
+
+        /// <summary>
+        /// Gets the preceding token (e.g., "3d", "180", or "360" for spatial formats).
+        /// </summary>
+        /// <value>The preceding token, or null if none.</value>
+        public string? PrecedingToken { get; }
     }
 }

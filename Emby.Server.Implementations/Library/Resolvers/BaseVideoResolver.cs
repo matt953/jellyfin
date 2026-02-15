@@ -198,11 +198,40 @@ namespace Emby.Server.Implementations.Library.Resolvers
             }
         }
 
-        protected void Set3DFormat(Video video, bool is3D, string format3D)
+        protected void Set3DFormat(Video video, bool is3D, string format3D, string precedingToken = null)
         {
             if (is3D)
             {
-                if (string.Equals(format3D, "fsbs", StringComparison.OrdinalIgnoreCase))
+                // Spatial/VR formats (check preceding token first)
+                if (string.Equals(precedingToken, "180", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.Equals(format3D, "sbs", StringComparison.OrdinalIgnoreCase))
+                    {
+                        video.Video3DFormat = Video3DFormat.Stereo180Sbs;
+                    }
+                    else if (string.Equals(format3D, "ou", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(format3D, "tb", StringComparison.OrdinalIgnoreCase))
+                    {
+                        video.Video3DFormat = Video3DFormat.Stereo180Ou;
+                    }
+                }
+                else if (string.Equals(precedingToken, "360", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.Equals(format3D, "sbs", StringComparison.OrdinalIgnoreCase))
+                    {
+                        video.Video3DFormat = Video3DFormat.Stereo360Sbs;
+                    }
+                    else if (string.Equals(format3D, "ou", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(format3D, "tb", StringComparison.OrdinalIgnoreCase))
+                    {
+                        video.Video3DFormat = Video3DFormat.Stereo360Ou;
+                    }
+                    else if (string.Equals(format3D, "mono", StringComparison.OrdinalIgnoreCase))
+                    {
+                        video.Video3DFormat = Video3DFormat.Mono360;
+                    }
+                }
+                else if (string.Equals(format3D, "fsbs", StringComparison.OrdinalIgnoreCase))
                 {
                     video.Video3DFormat = Video3DFormat.FullSideBySide;
                 }
@@ -239,14 +268,14 @@ namespace Emby.Server.Implementations.Library.Resolvers
 
         protected void Set3DFormat(Video video, VideoFileInfo videoInfo)
         {
-            Set3DFormat(video, videoInfo.Is3D, videoInfo.Format3D);
+            Set3DFormat(video, videoInfo.Is3D, videoInfo.Format3D, videoInfo.Format3DPrecedingToken);
         }
 
         protected void Set3DFormat(Video video)
         {
             var result = Format3DParser.Parse(video.Path, NamingOptions);
 
-            Set3DFormat(video, result.Is3D, result.Format3D);
+            Set3DFormat(video, result.Is3D, result.Format3D, result.PrecedingToken);
         }
 
         /// <summary>

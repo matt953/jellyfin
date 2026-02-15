@@ -145,7 +145,15 @@ public class DynamicHlsHelper
 
         var builder = new StringBuilder();
 
+        var enableApmp = (state.Request as StreamingRequestDto)?.EnableAppleMediaProfile ?? false;
+
         builder.AppendLine("#EXTM3U");
+
+        // Apple Projected Media Profile requires HLS version 12
+        if (enableApmp)
+        {
+            builder.AppendLine("#EXT-X-VERSION:12");
+        }
 
         var isLiveStream = state.IsSegmentedLiveStream;
 
@@ -347,6 +355,8 @@ public class DynamicHlsHelper
         AppendPlaylistResolutionField(playlistBuilder, state);
 
         AppendPlaylistFramerateField(playlistBuilder, state);
+
+        AppendPlaylistReqVideoLayoutField(playlistBuilder, state);
 
         if (!string.IsNullOrWhiteSpace(subtitleGroup))
         {
@@ -560,6 +570,48 @@ public class DynamicHlsHelper
         {
             builder.Append(",FRAME-RATE=")
                 .Append(framerate.Value.ToString(CultureInfo.InvariantCulture));
+        }
+    }
+
+    /// <summary>
+    /// Appends a REQ-VIDEO-LAYOUT field for spatial/3D video content.
+    /// This enables proper playback on Apple Vision Pro and other spatial video devices.
+    /// </summary>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <param name="builder">StringBuilder to append the field to.</param>
+    /// <param name="state">StreamState of the current stream.</param>
+    private void AppendPlaylistReqVideoLayoutField(StringBuilder builder, StreamState state)
+    {
+        // Only add REQ-VIDEO-LAYOUT when Apple Projected Media Profile is enabled
+        if (!(state.Request as StreamingRequestDto)?.EnableAppleMediaProfile ?? true)
+        {
+            return;
+        }
+
+        var format = state.MediaSource?.Video3DFormat;
+        if (format is null)
+        {
+            return;
+        }
+
+        // Apple HLS spec: REQ-VIDEO-LAYOUT uses "/" to separate channel and projection
+        // e.g., "CH-STEREO/PROJ-HEQU" for 180° stereo content
+        var layout = format switch
+        {
+            Video3DFormat.Mono360 => "CH-MONO/PROJ-EQUI",
+            Video3DFormat.Stereo180Sbs or Video3DFormat.Stereo180Ou => "CH-STEREO/PROJ-HEQU",
+            Video3DFormat.Stereo360Sbs or Video3DFormat.Stereo360Ou => "CH-STEREO/PROJ-EQUI",
+            // Flat 3D formats (MVC, SBS, TAB) - just CH-STEREO, no projection
+            Video3DFormat.MVC or Video3DFormat.HalfSideBySide or Video3DFormat.FullSideBySide
+                or Video3DFormat.HalfTopAndBottom or Video3DFormat.FullTopAndBottom => "CH-STEREO",
+            _ => null
+        };
+
+        if (layout is not null)
+        {
+            builder.Append(",REQ-VIDEO-LAYOUT=\"")
+                .Append(layout)
+                .Append('"');
         }
     }
 

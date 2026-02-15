@@ -993,6 +993,15 @@ namespace MediaBrowser.Controller.MediaEncoding
                 return string.Empty;
             }
 
+            // For MVC 3D Blu-ray content with mvc=true, use edge264 software decoder for SBS output
+            // Return early to skip hardware acceleration setup since this is a software decoder
+            if (state.BaseRequest?.EnableMvcDecoding == true
+                && state.MediaSource?.Video3DFormat == Video3DFormat.MVC
+                && _mediaEncoder.SupportsDecoder("libedge264"))
+            {
+                return "-c:v libedge264 -mvc_output 1";
+            }
+
             var args = new StringBuilder();
             var isWindows = OperatingSystem.IsWindows();
             var isLinux = OperatingSystem.IsLinux();
@@ -2493,7 +2502,42 @@ namespace MediaBrowser.Controller.MediaEncoding
                 return false;
             }
 
+            // Prevent stream copy for H264 spatial video content when Apple Projected Media Profile is enabled - VEXU metadata injection requires HEVC
+            if ((state.BaseRequest?.EnableAppleMediaProfile ?? false)
+                && string.Equals(videoStream.Codec, "h264", StringComparison.OrdinalIgnoreCase)
+                && state.MediaSource?.Video3DFormat is not null
+                && IsSpatialFormatRequiringVexu(state.MediaSource.Video3DFormat.Value))
+            {
+                return false;
+            }
+
+            // Prevent stream copy for MVC content when MVC decoding is enabled - edge264 decoder produces SBS output that must be re-encoded
+            if ((state.BaseRequest?.EnableMvcDecoding ?? false)
+                && state.MediaSource?.Video3DFormat == Video3DFormat.MVC)
+            {
+                return false;
+            }
+
             return true;
+        }
+
+        /// <summary>
+        /// Checks if a Video3DFormat is a spatial format that requires VEXU metadata injection.
+        /// </summary>
+        /// <param name="format">The 3D video format to check.</param>
+        /// <returns>True if the format requires VEXU metadata injection for spatial video playback.</returns>
+        public static bool IsSpatialFormatRequiringVexu(Video3DFormat format)
+        {
+            return format is Video3DFormat.Stereo180Sbs
+                or Video3DFormat.Stereo180Ou
+                or Video3DFormat.Stereo360Sbs
+                or Video3DFormat.Stereo360Ou
+                or Video3DFormat.Mono360
+                or Video3DFormat.HalfSideBySide
+                or Video3DFormat.FullSideBySide
+                or Video3DFormat.HalfTopAndBottom
+                or Video3DFormat.FullTopAndBottom
+                or Video3DFormat.MVC;
         }
 
         public bool CanStreamCopyAudio(EncodingJobInfo state, MediaStream audioStream, IEnumerable<string> supportedAudioCodecs)
@@ -3344,6 +3388,10 @@ namespace MediaBrowser.Controller.MediaEncoding
             var scaleVal = isV4l2 ? 64 : 2;
             var targetAr = isMjpeg ? "(a*sar)" : "a"; // manually calculate AR when using mjpeg encoder
 
+            // Skip spatial filters when Apple Media Profile is enabled - Vision Pro renders via VEXU metadata
+            var skipSpatialFilters = state?.BaseRequest?.EnableAppleMediaProfile ?? false;
+            var effectiveThreeDFormat = skipSpatialFilters ? null : threedFormat;
+
             // If fixed dimensions were supplied
             if (requestedWidth.HasValue && requestedHeight.HasValue)
             {
@@ -3359,13 +3407,19 @@ namespace MediaBrowser.Controller.MediaEncoding
                             heightParam);
                 }
 
-                return GetFixedSwScaleFilter(threedFormat, requestedWidth.Value, requestedHeight.Value);
+                return GetFixedSwScaleFilter(effectiveThreeDFormat, requestedWidth.Value, requestedHeight.Value);
             }
 
             // If Max dimensions were supplied, for width selects lowest even number between input width and width req size and selects lowest even number from in width*display aspect and requested size
 
             if (requestedMaxWidth.HasValue && requestedMaxHeight.HasValue)
             {
+                // For spatial formats, use the fixed filter which includes crop/v360 (MVC doesn't need this)
+                if (effectiveThreeDFormat.HasValue && effectiveThreeDFormat.Value != Video3DFormat.MVC)
+                {
+                    return GetFixedSwScaleFilter(effectiveThreeDFormat, requestedMaxWidth.Value, requestedMaxHeight.Value);
+                }
+
                 var maxWidthParam = requestedMaxWidth.Value.ToString(CultureInfo.InvariantCulture);
                 var maxHeightParam = requestedMaxHeight.Value.ToString(CultureInfo.InvariantCulture);
 
@@ -3381,10 +3435,10 @@ namespace MediaBrowser.Controller.MediaEncoding
             // If a fixed width was requested
             if (requestedWidth.HasValue)
             {
-                if (threedFormat.HasValue)
+                if (effectiveThreeDFormat.HasValue)
                 {
                     // This method can handle 0 being passed in for the requested height
-                    return GetFixedSwScaleFilter(threedFormat, requestedWidth.Value, 0);
+                    return GetFixedSwScaleFilter(effectiveThreeDFormat, requestedWidth.Value, 0);
                 }
 
                 var widthParam = requestedWidth.Value.ToString(CultureInfo.InvariantCulture);
@@ -3450,20 +3504,60 @@ namespace MediaBrowser.Controller.MediaEncoding
                 switch (threedFormat.Value)
                 {
                     case Video3DFormat.HalfSideBySide:
-                        filter = @"crop=iw/2:ih:0:0,scale=(iw*2):ih,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1,scale={0}:trunc({0}/dar/2)*2";
-                        // hsbs crop width in half,scale to correct size, set the display aspect,crop out any black bars we may have made the scale width to requestedWidth. Work out the correct height based on the display aspect it will maintain the aspect where -1 in this case (3d) may not.
+                        // hsbs: crop width in half, scale to half width to correct stored pixels, then scale to target
+                        // When height is specified (trickplay/I-frames), use simple scaling to ensure exact dimensions
+                        filter = requestedHeight > 0
+                            ? "crop=iw/2:ih:0:0,scale=iw*2:ih,scale=trunc({0}/2)*2:trunc({1}/2)*2"
+                            : @"crop=iw/2:ih:0:0,scale=(iw*2):ih,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1,scale={0}:trunc({0}/dar/2)*2";
                         break;
                     case Video3DFormat.FullSideBySide:
-                        filter = @"crop=iw/2:ih:0:0,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1,scale={0}:trunc({0}/dar/2)*2";
-                        // fsbs crop width in half,set the display aspect,crop out any black bars we may have made the scale width to requestedWidth.
+                        // fsbs: crop width in half, scale to target
+                        filter = requestedHeight > 0
+                            ? "crop=iw/2:ih:0:0,scale=trunc({0}/2)*2:trunc({1}/2)*2"
+                            : @"crop=iw/2:ih:0:0,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1,scale={0}:trunc({0}/dar/2)*2";
                         break;
                     case Video3DFormat.HalfTopAndBottom:
-                        filter = @"crop=iw:ih/2:0:0,scale=(iw*2):ih),setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1,scale={0}:trunc({0}/dar/2)*2";
-                        // htab crop height in half,scale to correct size, set the display aspect,crop out any black bars we may have made the scale width to requestedWidth
+                        // htab: crop height in half, scale to double height to correct stored pixels, then scale to target
+                        filter = requestedHeight > 0
+                            ? "crop=iw:ih/2:0:0,scale=iw:ih*2,scale=trunc({0}/2)*2:trunc({1}/2)*2"
+                            : @"crop=iw:ih/2:0:0,scale=iw:(ih*2),setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1,scale={0}:trunc({0}/dar/2)*2";
                         break;
                     case Video3DFormat.FullTopAndBottom:
-                        filter = @"crop=iw:ih/2:0:0,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1,scale={0}:trunc({0}/dar/2)*2";
-                        // ftab crop height in half, set the display aspect,crop out any black bars we may have made the scale width to requestedWidth
+                        // ftab: crop height in half, scale to target
+                        filter = requestedHeight > 0
+                            ? "crop=iw:ih/2:0:0,scale=trunc({0}/2)*2:trunc({1}/2)*2"
+                            : @"crop=iw:ih/2:0:0,setdar=dar=a,crop=min(iw\,ih*dar):min(ih\,iw/dar):(iw-min(iw\,iw*sar))/2:(ih - min (ih\,ih/sar))/2,setsar=sar=1,scale={0}:trunc({0}/dar/2)*2";
+                        break;
+                    case Video3DFormat.Stereo180Sbs:
+                        // Crop left eye from SBS, convert 180° equirectangular to flat rectilinear
+                        // setsar=1 forces square pixels so displayed dimensions match stored dimensions
+                        filter = requestedHeight > 0
+                            ? "crop=iw/2:ih:0:0,v360=hequirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,scale=trunc({0}/2)*2:trunc({1}/2)*2,setsar=1"
+                            : "crop=iw/2:ih:0:0,v360=hequirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,scale=trunc({0}/2)*2:trunc({0}/2)*2,setsar=1";
+                        break;
+                    case Video3DFormat.Stereo180Ou:
+                        // Crop top eye from OU, convert 180° equirectangular to flat rectilinear
+                        filter = requestedHeight > 0
+                            ? "crop=iw:ih/2:0:0,v360=hequirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,scale=trunc({0}/2)*2:trunc({1}/2)*2,setsar=1"
+                            : "crop=iw:ih/2:0:0,v360=hequirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,scale=trunc({0}/2)*2:trunc({0}/2)*2,setsar=1";
+                        break;
+                    case Video3DFormat.Stereo360Sbs:
+                        // Crop left eye from SBS, convert 360° equirectangular to flat rectilinear
+                        filter = requestedHeight > 0
+                            ? "crop=iw/2:ih:0:0,v360=equirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,scale=trunc({0}/2)*2:trunc({1}/2)*2,setsar=1"
+                            : "crop=iw/2:ih:0:0,v360=equirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,scale=trunc({0}/2)*2:trunc({0}/2)*2,setsar=1";
+                        break;
+                    case Video3DFormat.Stereo360Ou:
+                        // Crop top eye from OU, convert 360° equirectangular to flat rectilinear
+                        filter = requestedHeight > 0
+                            ? "crop=iw:ih/2:0:0,v360=equirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,scale=trunc({0}/2)*2:trunc({1}/2)*2,setsar=1"
+                            : "crop=iw:ih/2:0:0,v360=equirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,scale=trunc({0}/2)*2:trunc({0}/2)*2,setsar=1";
+                        break;
+                    case Video3DFormat.Mono360:
+                        // Convert 360° equirectangular to flat rectilinear (no crop needed)
+                        filter = requestedHeight > 0
+                            ? "v360=equirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,scale=trunc({0}/2)*2:trunc({1}/2)*2,setsar=1"
+                            : "v360=equirect:flat:h_fov=90:v_fov=90:yaw=0:pitch=0:interp=lanczos,scale=trunc({0}/2)*2:trunc({0}/2)*2,setsar=1";
                         break;
                     default:
                         break;
@@ -3484,6 +3578,118 @@ namespace MediaBrowser.Controller.MediaEncoding
             }
 
             return string.Format(CultureInfo.InvariantCulture, filter, widthParam, heightParam);
+        }
+
+        /// <summary>
+        /// Gets effective source dimensions after spatial video transformation.
+        /// Used for calculating correct output dimensions for trick play and I-frame playlists.
+        /// </summary>
+        /// <param name="sourceWidth">Original video width.</param>
+        /// <param name="sourceHeight">Original video height.</param>
+        /// <param name="format">The 3D/spatial video format.</param>
+        /// <returns>Effective width and height after spatial transformation.</returns>
+        public static (int Width, int Height) GetSpatialVideoSourceDimensions(
+            int sourceWidth, int sourceHeight, Video3DFormat? format)
+        {
+            if (!format.HasValue)
+            {
+                return (sourceWidth, sourceHeight);
+            }
+
+            return format.Value switch
+            {
+                // SBS: half width
+                Video3DFormat.HalfSideBySide or Video3DFormat.FullSideBySide
+                    => (sourceWidth / 2, sourceHeight),
+
+                // OU/TB: half height
+                Video3DFormat.HalfTopAndBottom or Video3DFormat.FullTopAndBottom
+                    => (sourceWidth, sourceHeight / 2),
+
+                // 360 formats with v360: produces square output at 90x90 FOV
+                Video3DFormat.Stereo180Sbs or Video3DFormat.Stereo360Sbs
+                    => GetV360OutputDimensions(sourceWidth / 2, sourceHeight),
+
+                Video3DFormat.Stereo180Ou or Video3DFormat.Stereo360Ou
+                    => GetV360OutputDimensions(sourceWidth, sourceHeight / 2),
+
+                Video3DFormat.Mono360
+                    => GetV360OutputDimensions(sourceWidth, sourceHeight),
+
+                _ => (sourceWidth, sourceHeight)
+            };
+        }
+
+        private static (int Width, int Height) GetV360OutputDimensions(int inputWidth, int inputHeight)
+        {
+            // For 90x90 FOV from equirectangular, output is square
+            // Horizontal: inputWidth covers 360° (or 180° for hequirect), extract 90°
+            // Vertical: inputHeight covers 180°, extract 90°
+            var w = (int)(inputWidth * 90.0 / 360.0);
+            var h = (int)(inputHeight * 90.0 / 180.0);
+            var size = Math.Max(Math.Min(w, h), 2);
+            return (2 * (size / 2), 2 * (size / 2)); // ensure even
+        }
+
+        /// <summary>
+        /// Checks if a 3D/spatial format requires software filters (crop/v360).
+        /// MVC is handled differently and doesn't need spatial filtering.
+        /// </summary>
+        /// <param name="format">The 3D/spatial video format.</param>
+        /// <returns>True if the format requires software filters; otherwise false.</returns>
+        public static bool RequiresSoftwareSpatialFilter(Video3DFormat? format)
+        {
+            if (!format.HasValue)
+            {
+                return false;
+            }
+
+            // MVC is decoded as single view, no filtering needed
+            return format.Value != Video3DFormat.MVC;
+        }
+
+        /// <summary>
+        /// Adds spatial video SW filter chain to the main filters for HW decoder paths.
+        /// Downloads from GPU, applies crop/v360/scale in SW, then optionally uploads back to GPU.
+        /// </summary>
+        /// <param name="mainFilters">The filter list to add to.</param>
+        /// <param name="state">Encoding job state.</param>
+        /// <param name="options">Encoding options.</param>
+        /// <param name="vidEncoder">Video encoder name.</param>
+        /// <param name="inW">Input width.</param>
+        /// <param name="inH">Input height.</param>
+        /// <param name="threeDFormat">3D/spatial format.</param>
+        /// <param name="reqW">Requested width.</param>
+        /// <param name="reqH">Requested height.</param>
+        /// <param name="reqMaxW">Requested max width.</param>
+        /// <param name="reqMaxH">Requested max height.</param>
+        /// <param name="downloadFormat">Pixel format after hwdownload (e.g., "nv12", "yuv420p").</param>
+        /// <param name="hwUploadFilter">HW upload filter to use (e.g., "hwupload_cuda"), or null to skip upload.</param>
+        private void AddSpatialFiltersForHwPipeline(
+            List<string> mainFilters,
+            EncodingJobInfo state,
+            EncodingOptions options,
+            string vidEncoder,
+            int? inW,
+            int? inH,
+            Video3DFormat? threeDFormat,
+            int? reqW,
+            int? reqH,
+            int? reqMaxW,
+            int? reqMaxH,
+            string downloadFormat,
+            string hwUploadFilter)
+        {
+            mainFilters.Add("hwdownload");
+            mainFilters.Add($"format={downloadFormat}");
+
+            var swScaleFilter = GetSwScaleFilter(state, options, vidEncoder, inW, inH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH);
+            mainFilters.Add(swScaleFilter);
+
+            if (!string.IsNullOrEmpty(hwUploadFilter))
+            {
+                mainFilters.Add(hwUploadFilter);
+            }
         }
 
         public static string GetSwDeinterlaceFilter(EncodingJobInfo state, EncodingOptions options)
@@ -3951,11 +4157,21 @@ namespace MediaBrowser.Controller.MediaEncoding
                     mainFilters.Add($"transpose_cuda=dir={transposeDir}");
                 }
 
-                var isRext = IsVideoStreamHevcRext(state);
-                var outFormat = doCuTonemap ? (isRext ? "p010" : string.Empty) : "yuv420p";
-                var hwScaleFilter = GetHwScaleFilter("scale", "cuda", outFormat, false, swpInW, swpInH, reqW, reqH, reqMaxW, reqMaxH);
-                // hw scale
-                mainFilters.Add(hwScaleFilter);
+                // Check if we need spatial SW filters (3D formats except MVC)
+                // Skip when Apple Media Profile is enabled - Vision Pro renders spatial content using VEXU metadata
+                if (threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false))
+                {
+                    var hwUpload = (isNvencEncoder && !doCuTonemap) ? "hwupload_cuda" : null;
+                    AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "yuv420p", hwUpload);
+                }
+                else
+                {
+                    var isRext = IsVideoStreamHevcRext(state);
+                    var outFormat = doCuTonemap ? (isRext ? "p010" : string.Empty) : "yuv420p";
+                    var hwScaleFilter = GetHwScaleFilter("scale", "cuda", outFormat, false, swpInW, swpInH, reqW, reqH, reqMaxW, reqMaxH);
+                    // hw scale
+                    mainFilters.Add(hwScaleFilter);
+                }
             }
 
             // hw tonemap
@@ -4170,10 +4386,21 @@ namespace MediaBrowser.Controller.MediaEncoding
                     mainFilters.Add($"transpose_opencl=dir={transposeDir}");
                 }
 
-                var outFormat = doOclTonemap ? string.Empty : "nv12";
-                var hwScaleFilter = GetHwScaleFilter("scale", "opencl", outFormat, false, swpInW, swpInH, reqW, reqH, reqMaxW, reqMaxH);
-                // hw scale
-                mainFilters.Add(hwScaleFilter);
+                // Check if we need spatial SW filters (3D formats except MVC)
+                // Skip when Apple Media Profile is enabled - Vision Pro renders spatial content using VEXU metadata
+                if (threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false))
+                {
+                    // Spatial formats require SW filters (crop/v360) - download, process, upload back
+                    var hwUpload = isAmfEncoder ? "hwupload=derive_device=d3d11va:extra_hw_frames=24" : null;
+                    AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                }
+                else
+                {
+                    var outFormat = doOclTonemap ? string.Empty : "nv12";
+                    var hwScaleFilter = GetHwScaleFilter("scale", "opencl", outFormat, false, swpInW, swpInH, reqW, reqH, reqMaxW, reqMaxH);
+                    // hw scale
+                    mainFilters.Add(hwScaleFilter);
+                }
             }
 
             // hw tonemap
@@ -4494,19 +4721,29 @@ namespace MediaBrowser.Controller.MediaEncoding
                     mainFilters.Add(deintFilter);
                 }
 
-                // hw transpose & scale & tonemap(w/o procamp)
-                mainFilters.Add(hwScaleFilter);
-
-                // hw tonemap(w/ procamp)
-                if (doVppTonemap && twoPassVppTonemap)
+                // Check if we need spatial SW filters (3D formats except MVC)
+                // Skip when Apple Media Profile is enabled - Vision Pro renders spatial content using VEXU metadata
+                if (threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false))
                 {
-                    mainFilters.Add("vpp_qsv=tonemap=1:format=nv12:async_depth=2");
+                    var hwUpload = isQsvEncoder ? "hwupload=derive_device=qsv:extra_hw_frames=64" : null;
+                    AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
                 }
-
-                // force bt709 just in case vpp tonemap is not triggered or using MSDK instead of VPL.
-                if (doVppTonemap)
+                else
                 {
-                    mainFilters.Add(GetOverwriteColorPropertiesParam(state, false));
+                    // hw transpose & scale & tonemap(w/o procamp)
+                    mainFilters.Add(hwScaleFilter);
+
+                    // hw tonemap(w/ procamp)
+                    if (doVppTonemap && twoPassVppTonemap)
+                    {
+                        mainFilters.Add("vpp_qsv=tonemap=1:format=nv12:async_depth=2");
+                    }
+
+                    // force bt709 just in case vpp tonemap is not triggered or using MSDK instead of VPL.
+                    if (doVppTonemap)
+                    {
+                        mainFilters.Add(GetOverwriteColorPropertiesParam(state, false));
+                    }
                 }
             }
 
@@ -4742,8 +4979,18 @@ namespace MediaBrowser.Controller.MediaEncoding
                     hwScaleFilter += ":extra_hw_frames=24";
                 }
 
-                // hw transpose(qsv vpp) & scale
-                mainFilters.Add(hwScaleFilter);
+                // Check if we need spatial SW filters (3D formats except MVC)
+                // Skip when Apple Media Profile is enabled - Vision Pro renders spatial content using VEXU metadata
+                if (threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false))
+                {
+                    var hwUpload = isQsvEncoder ? "hwupload=derive_device=qsv:extra_hw_frames=64" : null;
+                    AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                }
+                else
+                {
+                    // hw transpose(qsv vpp) & scale
+                    mainFilters.Add(hwScaleFilter);
+                }
             }
 
             // vaapi vpp tonemap
@@ -5061,8 +5308,19 @@ namespace MediaBrowser.Controller.MediaEncoding
                     hwScaleFilter += ":extra_hw_frames=24";
                 }
 
-                // hw scale
-                mainFilters.Add(hwScaleFilter);
+                // Check if we need spatial SW filters (3D formats except MVC)
+                // Check if we need spatial SW filters (3D formats except MVC)
+                // Skip when Apple Media Profile is enabled - Vision Pro renders spatial content using VEXU metadata
+                if (threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false))
+                {
+                    var hwUpload = isVaapiEncoder ? "hwupload_vaapi" : null;
+                    AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                }
+                else
+                {
+                    // hw scale
+                    mainFilters.Add(hwScaleFilter);
+                }
             }
 
             // vaapi vpp tonemap
@@ -5299,15 +5557,25 @@ namespace MediaBrowser.Controller.MediaEncoding
                         mainFilters.Add(deintFilter);
                     }
 
-                    // hw scale
-                    var hwScaleFilter = GetHwScaleFilter("scale", "vaapi", "nv12", false, inW, inH, reqW, reqH, reqMaxW, reqMaxH);
-
-                    if (!string.IsNullOrEmpty(hwScaleFilter) && isMjpegEncoder && !doVkTonemap)
+                    // Check if we need spatial SW filters (3D formats except MVC)
+                    // Skip when Apple Media Profile is enabled - Vision Pro renders spatial content using VEXU metadata
+                    if (threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false))
                     {
-                        hwScaleFilter += ":out_range=pc:mode=hq";
+                        var hwUpload = isVaapiEncoder ? "hwupload_vaapi" : null;
+                        AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
                     }
+                    else
+                    {
+                        // hw scale
+                        var hwScaleFilter = GetHwScaleFilter("scale", "vaapi", "nv12", false, inW, inH, reqW, reqH, reqMaxW, reqMaxH);
 
-                    mainFilters.Add(hwScaleFilter);
+                        if (!string.IsNullOrEmpty(hwScaleFilter) && isMjpegEncoder && !doVkTonemap)
+                        {
+                            hwScaleFilter += ":out_range=pc:mode=hq";
+                        }
+
+                        mainFilters.Add(hwScaleFilter);
+                    }
                 }
             }
 
@@ -5507,23 +5775,36 @@ namespace MediaBrowser.Controller.MediaEncoding
                     mainFilters.Add(deintFilter);
                 }
 
-                outFormat = doOclTonemap ? string.Empty : "nv12";
-                var hwScaleFilter = GetHwScaleFilter("scale", "vaapi", outFormat, false, inW, inH, reqW, reqH, reqMaxW, reqMaxH);
+                // Check if we need spatial SW filters (3D formats except MVC)
+                // Skip when Apple Media Profile is enabled - Vision Pro renders spatial content using VEXU metadata
+                var needsSpatialSwFilters = threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false);
 
-                if (!string.IsNullOrEmpty(hwScaleFilter) && isMjpegEncoder)
+                if (needsSpatialSwFilters)
                 {
-                    hwScaleFilter += doOclTonemap ? string.Empty : ":out_range=pc";
-                    hwScaleFilter += ":mode=hq";
+                    // Spatial formats require SW filters (crop/v360) - download, process, upload back
+                    var hwUpload = isVaapiEncoder ? "hwupload_vaapi" : null;
+                    AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
                 }
-
-                // allocate extra pool sizes for vaapi vpp
-                if (!string.IsNullOrEmpty(hwScaleFilter))
+                else
                 {
-                    hwScaleFilter += ":extra_hw_frames=24";
-                }
+                    outFormat = doOclTonemap ? string.Empty : "nv12";
+                    var hwScaleFilter = GetHwScaleFilter("scale", "vaapi", outFormat, false, inW, inH, reqW, reqH, reqMaxW, reqMaxH);
 
-                // hw scale
-                mainFilters.Add(hwScaleFilter);
+                    if (!string.IsNullOrEmpty(hwScaleFilter) && isMjpegEncoder)
+                    {
+                        hwScaleFilter += doOclTonemap ? string.Empty : ":out_range=pc";
+                        hwScaleFilter += ":mode=hq";
+                    }
+
+                    // allocate extra pool sizes for vaapi vpp
+                    if (!string.IsNullOrEmpty(hwScaleFilter))
+                    {
+                        hwScaleFilter += ":extra_hw_frames=24";
+                    }
+
+                    // hw scale
+                    mainFilters.Add(hwScaleFilter);
+                }
             }
 
             if (doOclTonemap && isVaapiDecoder)
@@ -5736,24 +6017,35 @@ namespace MediaBrowser.Controller.MediaEncoding
                 mainFilters.Add($"transpose_vt=dir={transposeDir}");
             }
 
-            if (doVtTonemap)
+            // Check if we need spatial SW filters (3D formats except MVC)
+            // Skip when Apple Media Profile is enabled - Vision Pro renders spatial content using VEXU metadata
+            if (threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false))
             {
-                const string VtTonemapArgs = "color_matrix=bt709:color_primaries=bt709:color_transfer=bt709";
-
-                // scale_vt can handle scaling & tonemapping in one shot, just like vpp_qsv.
-                hwScaleFilter = string.IsNullOrEmpty(hwScaleFilter)
-                    ? "scale_vt=" + VtTonemapArgs
-                    : hwScaleFilter + ":" + VtTonemapArgs;
+                // Spatial formats require SW filters (crop/v360) - download, process, upload back
+                var hwUpload = isVtEncoder ? "hwupload" : null;
+                AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
             }
-
-            // hw scale & vt tonemap
-            mainFilters.Add(hwScaleFilter);
-
-            // Metal tonemap
-            if (doMetalTonemap)
+            else
             {
-                var tonemapFilter = GetHwTonemapFilter(options, "videotoolbox", "nv12", isMjpegEncoder);
-                mainFilters.Add(tonemapFilter);
+                if (doVtTonemap)
+                {
+                    const string VtTonemapArgs = "color_matrix=bt709:color_primaries=bt709:color_transfer=bt709";
+
+                    // scale_vt can handle scaling & tonemapping in one shot, just like vpp_qsv.
+                    hwScaleFilter = string.IsNullOrEmpty(hwScaleFilter)
+                        ? "scale_vt=" + VtTonemapArgs
+                        : hwScaleFilter + ":" + VtTonemapArgs;
+                }
+
+                // hw scale & vt tonemap
+                mainFilters.Add(hwScaleFilter);
+
+                // Metal tonemap
+                if (doMetalTonemap)
+                {
+                    var tonemapFilter = GetHwTonemapFilter(options, "videotoolbox", "nv12", isMjpegEncoder);
+                    mainFilters.Add(tonemapFilter);
+                }
             }
 
             /* Make sub and overlay filters for subtitle stream */
@@ -5946,52 +6238,63 @@ namespace MediaBrowser.Controller.MediaEncoding
             {
                 // INPUT rkmpp/drm surface(gem/dma-heap)
 
-                var isFullAfbcPipeline = isEncoderSupportAfbc && isDrmInDrmOut && !doOclTonemap;
-                var swapOutputWandH = doRkVppTranspose && swapWAndH;
-                var outFormat = doOclTonemap ? "p010" : "nv12";
-                var hwScaleFilter = GetHwScaleFilter("vpp", "rkrga", outFormat, swapOutputWandH, swpInW, swpInH, reqW, reqH, reqMaxW, reqMaxH);
-                var doScaling = !string.IsNullOrEmpty(GetHwScaleFilter("vpp", "rkrga", string.Empty, swapOutputWandH, swpInW, swpInH, reqW, reqH, reqMaxW, reqMaxH));
-
-                if (!hasSubs
-                     || doRkVppTranspose
-                     || !isFullAfbcPipeline
-                     || doScaling)
+                // Check if we need spatial SW filters (3D formats except MVC)
+                // Skip when Apple Media Profile is enabled - Vision Pro renders spatial content using VEXU metadata
+                if (threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false))
                 {
-                    var isScaleRatioSupported = IsScaleRatioSupported(inW, inH, reqW, reqH, reqMaxW, reqMaxH, 8.0f);
+                    // Spatial formats require SW filters (crop/v360) - download, process, upload back
+                    var hwUpload = isRkmppEncoder ? "hwupload=derive_device=rkmpp" : null;
+                    AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                }
+                else
+                {
+                    var isFullAfbcPipeline = isEncoderSupportAfbc && isDrmInDrmOut && !doOclTonemap;
+                    var swapOutputWandH = doRkVppTranspose && swapWAndH;
+                    var outFormat = doOclTonemap ? "p010" : "nv12";
+                    var hwScaleFilter = GetHwScaleFilter("vpp", "rkrga", outFormat, swapOutputWandH, swpInW, swpInH, reqW, reqH, reqMaxW, reqMaxH);
+                    var doScaling = !string.IsNullOrEmpty(GetHwScaleFilter("vpp", "rkrga", string.Empty, swapOutputWandH, swpInW, swpInH, reqW, reqH, reqMaxW, reqMaxH));
 
-                    // RGA3 hardware only support (1/8 ~ 8) scaling in each blit operation,
-                    // but in Trickplay there's a case: (3840/320 == 12), enable 2pass for it
-                    if (doScaling && !isScaleRatioSupported)
+                    if (!hasSubs
+                         || doRkVppTranspose
+                         || !isFullAfbcPipeline
+                         || doScaling)
                     {
-                        // Vendor provided BSP kernel has an RGA driver bug that causes the output to be corrupted for P010 format.
-                        // Use NV15 instead of P010 to avoid the issue.
-                        // SDR inputs are using BGRA formats already which is not affected.
-                        var intermediateFormat = doOclTonemap ? "nv15" : (isMjpegEncoder ? "bgra" : outFormat);
-                        var hwScaleFilterFirstPass = $"scale_rkrga=w=iw/7.9:h=ih/7.9:format={intermediateFormat}:force_original_aspect_ratio=increase:force_divisible_by=4:afbc=1";
-                        mainFilters.Add(hwScaleFilterFirstPass);
-                    }
+                        var isScaleRatioSupported = IsScaleRatioSupported(inW, inH, reqW, reqH, reqMaxW, reqMaxH, 8.0f);
 
-                    // The RKMPP MJPEG encoder on some newer chip models no longer supports RGB input.
-                    // Use 2pass here to enable RGA output of full-range YUV in the 2nd pass.
-                    if (isMjpegEncoder && !doOclTonemap && ((doScaling && isScaleRatioSupported) || !doScaling))
-                    {
-                        var hwScaleFilterFirstPass = "vpp_rkrga=format=bgra:afbc=1";
-                        mainFilters.Add(hwScaleFilterFirstPass);
-                    }
+                        // RGA3 hardware only support (1/8 ~ 8) scaling in each blit operation,
+                        // but in Trickplay there's a case: (3840/320 == 12), enable 2pass for it
+                        if (doScaling && !isScaleRatioSupported)
+                        {
+                            // Vendor provided BSP kernel has an RGA driver bug that causes the output to be corrupted for P010 format.
+                            // Use NV15 instead of P010 to avoid the issue.
+                            // SDR inputs are using BGRA formats already which is not affected.
+                            var intermediateFormat = doOclTonemap ? "nv15" : (isMjpegEncoder ? "bgra" : outFormat);
+                            var hwScaleFilterFirstPass = $"scale_rkrga=w=iw/7.9:h=ih/7.9:format={intermediateFormat}:force_original_aspect_ratio=increase:force_divisible_by=4:afbc=1";
+                            mainFilters.Add(hwScaleFilterFirstPass);
+                        }
 
-                    if (!string.IsNullOrEmpty(hwScaleFilter) && doRkVppTranspose)
-                    {
-                        hwScaleFilter += $":transpose={transposeDir}";
-                    }
+                        // The RKMPP MJPEG encoder on some newer chip models no longer supports RGB input.
+                        // Use 2pass here to enable RGA output of full-range YUV in the 2nd pass.
+                        if (isMjpegEncoder && !doOclTonemap && ((doScaling && isScaleRatioSupported) || !doScaling))
+                        {
+                            var hwScaleFilterFirstPass = "vpp_rkrga=format=bgra:afbc=1";
+                            mainFilters.Add(hwScaleFilterFirstPass);
+                        }
 
-                    // try enabling AFBC to save DDR bandwidth
-                    if (!string.IsNullOrEmpty(hwScaleFilter) && isFullAfbcPipeline)
-                    {
-                        hwScaleFilter += ":afbc=1";
-                    }
+                        if (!string.IsNullOrEmpty(hwScaleFilter) && doRkVppTranspose)
+                        {
+                            hwScaleFilter += $":transpose={transposeDir}";
+                        }
 
-                    // hw transpose & scale
-                    mainFilters.Add(hwScaleFilter);
+                        // try enabling AFBC to save DDR bandwidth
+                        if (!string.IsNullOrEmpty(hwScaleFilter) && isFullAfbcPipeline)
+                        {
+                            hwScaleFilter += ":afbc=1";
+                        }
+
+                        // hw transpose & scale
+                        mainFilters.Add(hwScaleFilter);
+                    }
                 }
             }
 
@@ -6131,16 +6434,23 @@ namespace MediaBrowser.Controller.MediaEncoding
             List<string> subFilters;
             List<string> overlayFilters;
 
-            (mainFilters, subFilters, overlayFilters) = options.HardwareAccelerationType switch
-            {
-                HardwareAccelerationType.vaapi => GetVaapiVidFilterChain(state, options, outputVideoCodec),
-                HardwareAccelerationType.amf => GetAmdVidFilterChain(state, options, outputVideoCodec),
-                HardwareAccelerationType.qsv => GetIntelVidFilterChain(state, options, outputVideoCodec),
-                HardwareAccelerationType.nvenc => GetNvidiaVidFilterChain(state, options, outputVideoCodec),
-                HardwareAccelerationType.videotoolbox => GetAppleVidFilterChain(state, options, outputVideoCodec),
-                HardwareAccelerationType.rkmpp => GetRkmppVidFilterChain(state, options, outputVideoCodec),
-                _ => GetSwVidFilterChain(state, options, outputVideoCodec),
-            };
+            // MVC with libedge264 is a software decoder, so we must use software filters
+            // regardless of the hardware acceleration setting
+            var useMvcSoftwareDecoding = state.BaseRequest?.EnableMvcDecoding == true
+                && state.MediaSource?.Video3DFormat == Video3DFormat.MVC;
+
+            (mainFilters, subFilters, overlayFilters) = useMvcSoftwareDecoding
+                ? GetSwVidFilterChain(state, options, outputVideoCodec)
+                : options.HardwareAccelerationType switch
+                {
+                    HardwareAccelerationType.vaapi => GetVaapiVidFilterChain(state, options, outputVideoCodec),
+                    HardwareAccelerationType.amf => GetAmdVidFilterChain(state, options, outputVideoCodec),
+                    HardwareAccelerationType.qsv => GetIntelVidFilterChain(state, options, outputVideoCodec),
+                    HardwareAccelerationType.nvenc => GetNvidiaVidFilterChain(state, options, outputVideoCodec),
+                    HardwareAccelerationType.videotoolbox => GetAppleVidFilterChain(state, options, outputVideoCodec),
+                    HardwareAccelerationType.rkmpp => GetRkmppVidFilterChain(state, options, outputVideoCodec),
+                    _ => GetSwVidFilterChain(state, options, outputVideoCodec),
+                };
 
             mainFilters?.RemoveAll(string.IsNullOrEmpty);
             subFilters?.RemoveAll(string.IsNullOrEmpty);
@@ -7098,6 +7408,37 @@ namespace MediaBrowser.Controller.MediaEncoding
                 {
                     state.OutputVideoCodec = "copy";
                 }
+
+                // For forced transcoding (apmp or mvc with spatial content), ensure proper bitrate and dimensions
+                // Client may have expected stream copy and not specified these values
+                // VideoStream.Width and BitRate are already adjusted at source for MVC
+                var needsForcedTranscodeDefaults = state.VideoStream is not null
+                    && !string.Equals(state.OutputVideoCodec, "copy", StringComparison.OrdinalIgnoreCase)
+                    && state.MediaSource?.Video3DFormat is not null
+                    && IsSpatialFormatRequiringVexu(state.MediaSource.Video3DFormat.Value)
+                    && ((state.BaseRequest?.EnableAppleMediaProfile ?? false) || (state.BaseRequest?.EnableMvcDecoding ?? false));
+
+                if (needsForcedTranscodeDefaults)
+                {
+                    if ((!state.OutputVideoBitrate.HasValue || state.OutputVideoBitrate.Value == 0)
+                        && state.VideoStream.BitRate.HasValue)
+                    {
+                        state.OutputVideoBitrate = state.VideoStream.BitRate.Value;
+                    }
+
+                    // Only set MaxWidth/MaxHeight if VideoBitRate is also not specified
+                    // Otherwise, let the bitrate-based scaling in StreamingHelpers handle it
+                    if (state.BaseRequest is not null
+                        && !state.BaseRequest.VideoBitRate.HasValue
+                        && !state.BaseRequest.Width.HasValue
+                        && !state.BaseRequest.Height.HasValue
+                        && !state.BaseRequest.MaxWidth.HasValue
+                        && !state.BaseRequest.MaxHeight.HasValue)
+                    {
+                        state.BaseRequest.MaxWidth = state.VideoStream.Width;
+                        state.BaseRequest.MaxHeight = state.VideoStream.Height;
+                    }
+                }
             }
 
             var preventHlsAudioCopy = state.TranscodingType is TranscodingJobType.Hls
@@ -7327,6 +7668,25 @@ namespace MediaBrowser.Controller.MediaEncoding
                 }
 
                 state.VideoStream = GetMediaStream(mediaStreams, videoRequest.VideoStreamIndex, MediaStreamType.Video);
+
+                // MVC with libedge264 decoder outputs side-by-side (2x width, 2x bitrate)
+                // MVC encodes second view as delta, so source bitrate is ~half of full SBS
+                // Adjust at source so all downstream code uses correct values
+                if (videoRequest.EnableMvcDecoding
+                    && mediaSource.Video3DFormat == Video3DFormat.MVC
+                    && state.VideoStream is not null)
+                {
+                    if (state.VideoStream.Width.HasValue)
+                    {
+                        state.VideoStream.Width *= 2;
+                    }
+
+                    if (state.VideoStream.BitRate.HasValue)
+                    {
+                        state.VideoStream.BitRate *= 2;
+                    }
+                }
+
                 state.SubtitleStream = GetMediaStream(mediaStreams, videoRequest.SubtitleStreamIndex, MediaStreamType.Subtitle, false);
                 state.SubtitleDeliveryMethod = videoRequest.SubtitleMethod;
                 state.AudioStream = GetMediaStream(mediaStreams, videoRequest.AudioStreamIndex, MediaStreamType.Audio);

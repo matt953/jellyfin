@@ -257,6 +257,17 @@ public class TrickplayManager : ITrickplayManager
                     return;
                 }
 
+                // Ensure mediaSource has Video3DFormat from the video for spatial video filtering
+                // MVC is decoded as single view and doesn't need special handling
+                if (video.Video3DFormat.HasValue && video.Video3DFormat.Value != Video3DFormat.MVC)
+                {
+                    mediaSource.Video3DFormat = video.Video3DFormat;
+                }
+                else
+                {
+                    mediaSource.Video3DFormat = null;
+                }
+
                 var mediaPath = mediaSource.Path;
                 if (!File.Exists(mediaPath))
                 {
@@ -275,11 +286,17 @@ public class TrickplayManager : ITrickplayManager
                 // The width has to be even, otherwise a lot of filters will not be able to sample it
                 var actualWidth = 2 * (width / 2);
 
+                // Get effective dimensions after spatial video transformation (e.g., cropping SBS, converting 360°)
+                var sourceWidth = mediaSource.VideoStream.Width ?? 0;
+                var sourceHeight = mediaSource.VideoStream.Height ?? 0;
+                var (effectiveWidth, _) = EncodingHelper.GetSpatialVideoSourceDimensions(
+                    sourceWidth, sourceHeight, video.Video3DFormat);
+
                 // Force using the video width when the trickplay setting has a too large width
-                if (mediaSource.VideoStream.Width is not null && mediaSource.VideoStream.Width < width)
+                if (effectiveWidth > 0 && effectiveWidth < width)
                 {
-                    _logger.LogWarning("Video width {VideoWidth} is smaller than trickplay setting {TrickPlayWidth}, using video width for thumbnails", mediaSource.VideoStream.Width, width);
-                    actualWidth = 2 * ((int)mediaSource.VideoStream.Width / 2);
+                    _logger.LogWarning("Video effective width {VideoWidth} is smaller than trickplay setting {TrickPlayWidth}, using video width for thumbnails", effectiveWidth, width);
+                    actualWidth = 2 * (effectiveWidth / 2);
                 }
 
                 var tileWidth = options.TileWidth;
@@ -722,6 +739,17 @@ public class TrickplayManager : ITrickplayManager
             return;
         }
 
+        // Ensure mediaSource has Video3DFormat from the video for spatial video filtering
+        // MVC is decoded as single view and doesn't need special handling
+        if (video.Video3DFormat.HasValue && video.Video3DFormat.Value != Video3DFormat.MVC)
+        {
+            mediaSource.Video3DFormat = video.Video3DFormat;
+        }
+        else
+        {
+            mediaSource.Video3DFormat = null;
+        }
+
         var mediaPath = mediaSource.Path;
         if (!File.Exists(mediaPath))
         {
@@ -789,10 +817,14 @@ public class TrickplayManager : ITrickplayManager
             var bandwidth = (int)Math.Ceiling((double)maxSegmentSize * 8);
 
             // Calculate width from aspect ratio (height is fixed at 160)
+            // Use effective dimensions after spatial video transformation (e.g., cropping SBS, converting 360°)
             var sourceWidth = mediaSource.VideoStream.Width ?? 0;
             var sourceHeight = mediaSource.VideoStream.Height ?? 0;
-            var actualWidth = sourceHeight > 0
-                ? (int)Math.Ceiling((double)TargetHeight * sourceWidth / sourceHeight)
+            var (effectiveWidth, effectiveHeight) = EncodingHelper.GetSpatialVideoSourceDimensions(
+                sourceWidth, sourceHeight, video.Video3DFormat);
+
+            var actualWidth = effectiveHeight > 0
+                ? (int)Math.Ceiling((double)TargetHeight * effectiveWidth / effectiveHeight)
                 : 0;
             // Ensure width is even (required for H.264)
             actualWidth = 2 * (actualWidth / 2);

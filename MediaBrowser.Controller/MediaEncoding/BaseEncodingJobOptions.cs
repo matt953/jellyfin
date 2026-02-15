@@ -193,6 +193,18 @@ namespace MediaBrowser.Controller.MediaEncoding
 
         public bool AlwaysBurnInSubtitleWhenTranscoding { get; set; }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether to enable Apple Projected Media Profile for spatial video.
+        /// When true, enables VEXU metadata injection and REQ-VIDEO-LAYOUT HLS tags.
+        /// </summary>
+        public bool EnableAppleMediaProfile { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether to enable MVC decoding for stereoscopic 3D Blu-ray content.
+        /// When true, uses edge264 decoder with mvc_output=1 for side-by-side output.
+        /// </summary>
+        public bool EnableMvcDecoding { get; set; }
+
         public string GetOption(string qualifier, string name)
         {
             var value = GetOption(qualifier + "-" + name);

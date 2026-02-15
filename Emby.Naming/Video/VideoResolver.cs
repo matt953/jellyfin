@@ -105,6 +105,7 @@ namespace Emby.Naming.Video
                 stubType: stubType,
                 is3D: format3DResult.Is3D,
                 format3D: format3DResult.Format3D,
+                format3DPrecedingToken: format3DResult.PrecedingToken,
                 extraType: extraResult.ExtraType,
                 isDirectory: isDirectory,
                 extraRule: extraResult.Rule);

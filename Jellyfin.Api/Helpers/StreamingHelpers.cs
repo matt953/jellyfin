@@ -199,6 +199,17 @@ public static class StreamingHelpers
         if (state.VideoRequest is not null)
         {
             state.OutputVideoCodec = state.Request.VideoCodec;
+
+            // Force HEVC early for spatial video (apmp or mvc) before bitrate calculation
+            // VEXU metadata injection requires HEVC (hvc1/dvh1)
+            if (string.IsNullOrEmpty(state.OutputVideoCodec)
+                && state.MediaSource?.Video3DFormat is not null
+                && EncodingHelper.IsSpatialFormatRequiringVexu(state.MediaSource.Video3DFormat.Value)
+                && ((state.BaseRequest?.EnableAppleMediaProfile ?? false) || (state.BaseRequest?.EnableMvcDecoding ?? false)))
+            {
+                state.OutputVideoCodec = "hevc";
+            }
+
             state.OutputVideoBitrate = encodingHelper.GetVideoBitrateParamValue(state.VideoRequest, state.VideoStream, state.OutputVideoCodec);
 
             encodingHelper.TryStreamCopy(state, encodingOptions);

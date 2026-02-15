@@ -18,6 +18,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
         [
             "h264",
             "hevc",
+            "libedge264",
             "vp8",
             "libvpx",
             "vp9",

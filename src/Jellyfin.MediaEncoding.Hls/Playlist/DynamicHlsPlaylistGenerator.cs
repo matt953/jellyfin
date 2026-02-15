@@ -50,7 +50,8 @@ public class DynamicHlsPlaylistGenerator : IDynamicHlsPlaylistGenerator
 
         // http://ffmpeg.org/ffmpeg-all.html#toc-hls-2
         var isHlsInFmp4 = string.Equals(segmentExtension, ".mp4", StringComparison.OrdinalIgnoreCase);
-        var hlsVersion = isHlsInFmp4 ? "7" : "3";
+        // Apple Projected Media Profile requires HLS version 12
+        var hlsVersion = request.EnableAppleMediaProfile ? "12" : (isHlsInFmp4 ? "7" : "3");
 
         var builder = new StringBuilder(128);
 
