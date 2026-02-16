@@ -1246,15 +1246,15 @@ namespace MediaBrowser.MediaEncoding.Encoder
             }
             else if (vidEncoder.Contains("nvenc", StringComparison.OrdinalIgnoreCase))
             {
-                encoderOptions = "-b:v 500k -maxrate 500k -bufsize 1000k -profile:v high -level 4.0 ";
+                encoderOptions = "-bf 0 -b:v 500k -maxrate 500k -bufsize 1000k -profile:v high -level 4.0 ";
             }
             else if (vidEncoder.Contains("qsv", StringComparison.OrdinalIgnoreCase))
             {
-                encoderOptions = "-b:v 1000k -maxrate 1001k -bufsize 4000k -profile:v high -level 40 ";
+                encoderOptions = "-bf 0 -b:v 1000k -maxrate 1001k -bufsize 4000k -profile:v high -level 40 ";
             }
             else if (vidEncoder.Contains("vaapi", StringComparison.OrdinalIgnoreCase))
             {
-                encoderOptions = "-rc_mode VBR -b:v 500k -maxrate 500k -bufsize 1000k -profile:v high -level 40 ";
+                encoderOptions = "-bf 0 -rc_mode VBR -b:v 500k -maxrate 500k -bufsize 1000k -profile:v high -level 40 ";
             }
             else
             {
@@ -1265,7 +1265,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
             // HLS I-frame arguments with fMP4 segments
             var args = string.Format(
                 CultureInfo.InvariantCulture,
-                "-loglevel error {0} -an -sn {1} -threads {2} -c:v {3} -g 1 -keyint_min 1 {4}" +
+                "-loglevel error {0} -an -sn {1} -threads {2} -c:v {3} -g 2 -keyint_min 1 {4}" +
                 "-f hls -hls_segment_type fmp4 -hls_playlist_type vod " +
                 "-hls_flags independent_segments+iframes_only " +
                 "-hls_time 1 -hls_list_size 0 " +

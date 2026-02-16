@@ -4141,6 +4141,8 @@ namespace MediaBrowser.Controller.MediaEncoding
                 }
             }
 
+            var spatialDownloadedToCpu = false;
+
             if (isNvDecoder)
             {
                 // INPUT cuda surface(vram)
@@ -4162,7 +4164,9 @@ namespace MediaBrowser.Controller.MediaEncoding
                 if (threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false))
                 {
                     var hwUpload = (isNvencEncoder && !doCuTonemap) ? "hwupload_cuda" : null;
-                    AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "yuv420p", hwUpload);
+                    AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                    // If hwUpload is null, spatial filters left data in CPU memory (no re-upload to GPU)
+                    spatialDownloadedToCpu = hwUpload is null;
                 }
                 else
                 {
@@ -4183,12 +4187,18 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             var memoryOutput = false;
             var isUploadForCuTonemap = isSwDecoder && doCuTonemap;
-            if ((isNvDecoder && isSwEncoder) || (isUploadForCuTonemap && hasSubs))
+            if (((isNvDecoder && isSwEncoder) || (isUploadForCuTonemap && hasSubs)) && !spatialDownloadedToCpu)
             {
                 memoryOutput = true;
 
                 // OUTPUT yuv420p surface(memory)
                 mainFilters.Add("hwdownload");
+                mainFilters.Add("format=yuv420p");
+            }
+            else if (spatialDownloadedToCpu)
+            {
+                memoryOutput = true;
+                // Spatial filters left data in CPU as nv12; convert to yuv420p for SW encoders
                 mainFilters.Add("format=yuv420p");
             }
 
@@ -4367,6 +4377,8 @@ namespace MediaBrowser.Controller.MediaEncoding
                 }
             }
 
+            var spatialDownloadedToCpu = false;
+
             if (isD3d11vaDecoder)
             {
                 // INPUT d3d11 surface(vram)
@@ -4393,6 +4405,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                     // Spatial formats require SW filters (crop/v360) - download, process, upload back
                     var hwUpload = isAmfEncoder ? "hwupload=derive_device=d3d11va:extra_hw_frames=24" : null;
                     AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                    spatialDownloadedToCpu = hwUpload is null;
                 }
                 else
                 {
@@ -4412,7 +4425,7 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             var memoryOutput = false;
             var isUploadForOclTonemap = isSwDecoder && doOclTonemap;
-            if (isD3d11vaDecoder && isSwEncoder)
+            if (isD3d11vaDecoder && isSwEncoder && !spatialDownloadedToCpu)
             {
                 memoryOutput = true;
 
@@ -4421,6 +4434,10 @@ namespace MediaBrowser.Controller.MediaEncoding
                 var hwTransferFilter = hasGraphicalSubs ? "hwdownload" : "hwmap=mode=read";
                 mainFilters.Add(hwTransferFilter);
                 mainFilters.Add("format=nv12");
+            }
+            else if (spatialDownloadedToCpu)
+            {
+                memoryOutput = true;
             }
 
             // OUTPUT yuv420p surface
@@ -4600,6 +4617,8 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             mainFilters.Add(GetOverwriteColorPropertiesParam(state, doTonemap));
 
+            var spatialDownloadedToCpu = false;
+
             if (isSwDecoder)
             {
                 // INPUT sw surface(memory)
@@ -4727,6 +4746,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                 {
                     var hwUpload = isQsvEncoder ? "hwupload=derive_device=qsv:extra_hw_frames=64" : null;
                     AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                    spatialDownloadedToCpu = hwUpload is null;
                 }
                 else
                 {
@@ -4763,7 +4783,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             var memoryOutput = false;
             var isUploadForOclTonemap = isSwDecoder && doOclTonemap;
             var isHwmapUsable = isSwEncoder && doOclTonemap;
-            if ((isHwDecoder && isSwEncoder) || isUploadForOclTonemap)
+            if (((isHwDecoder && isSwEncoder) || isUploadForOclTonemap) && !spatialDownloadedToCpu)
             {
                 memoryOutput = true;
 
@@ -4772,6 +4792,10 @@ namespace MediaBrowser.Controller.MediaEncoding
                 // qsv hwmap is not fully implemented for the time being.
                 mainFilters.Add(isHwmapUsable ? "hwmap=mode=read" : "hwdownload");
                 mainFilters.Add("format=nv12");
+            }
+            else if (spatialDownloadedToCpu)
+            {
+                memoryOutput = true;
             }
 
             // OUTPUT nv12 surface(memory)
@@ -4904,6 +4928,8 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             mainFilters.Add(GetOverwriteColorPropertiesParam(state, doTonemap));
 
+            var spatialDownloadedToCpu = false;
+
             if (isSwDecoder)
             {
                 // INPUT sw surface(memory)
@@ -4985,6 +5011,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                 {
                     var hwUpload = isQsvEncoder ? "hwupload=derive_device=qsv:extra_hw_frames=64" : null;
                     AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                    spatialDownloadedToCpu = hwUpload is null;
                 }
                 else
                 {
@@ -5030,7 +5057,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             var memoryOutput = false;
             var isUploadForOclTonemap = isSwDecoder && doOclTonemap;
             var isHwmapUsable = isSwEncoder && (doOclTonemap || isVaapiDecoder);
-            if ((isHwDecoder && isSwEncoder) || isUploadForOclTonemap)
+            if (((isHwDecoder && isSwEncoder) || isUploadForOclTonemap) && !spatialDownloadedToCpu)
             {
                 memoryOutput = true;
 
@@ -5039,6 +5066,10 @@ namespace MediaBrowser.Controller.MediaEncoding
                 // qsv hwmap is not fully implemented for the time being.
                 mainFilters.Add(isHwmapUsable ? "hwmap=mode=read" : "hwdownload");
                 mainFilters.Add("format=nv12");
+            }
+            else if (spatialDownloadedToCpu)
+            {
+                memoryOutput = true;
             }
 
             // OUTPUT nv12 surface(memory)
@@ -5245,6 +5276,8 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             mainFilters.Add(GetOverwriteColorPropertiesParam(state, doTonemap));
 
+            var spatialDownloadedToCpu = false;
+
             if (isSwDecoder)
             {
                 // INPUT sw surface(memory)
@@ -5315,6 +5348,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                 {
                     var hwUpload = isVaapiEncoder ? "hwupload_vaapi" : null;
                     AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                    spatialDownloadedToCpu = hwUpload is null;
                 }
                 else
                 {
@@ -5354,7 +5388,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             var memoryOutput = false;
             var isUploadForOclTonemap = isSwDecoder && doOclTonemap;
             var isHwmapNotUsable = isUploadForOclTonemap && isVaapiEncoder;
-            if ((isVaapiDecoder && isSwEncoder) || isUploadForOclTonemap)
+            if (((isVaapiDecoder && isSwEncoder) || isUploadForOclTonemap) && !spatialDownloadedToCpu)
             {
                 memoryOutput = true;
 
@@ -5362,6 +5396,10 @@ namespace MediaBrowser.Controller.MediaEncoding
                 // prefer hwmap to hwdownload on opencl/vaapi.
                 mainFilters.Add(isHwmapNotUsable ? "hwdownload" : "hwmap=mode=read");
                 mainFilters.Add("format=nv12");
+            }
+            else if (spatialDownloadedToCpu)
+            {
+                memoryOutput = true;
             }
 
             // OUTPUT nv12 surface(memory)
@@ -5489,6 +5527,8 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             mainFilters.Add(GetOverwriteColorPropertiesParam(state, doVkTonemap));
 
+            var spatialDownloadedToCpu = false;
+
             if (isSwDecoder)
             {
                 // INPUT sw surface(memory)
@@ -5563,6 +5603,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                     {
                         var hwUpload = isVaapiEncoder ? "hwupload_vaapi" : null;
                         AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                        spatialDownloadedToCpu = hwUpload is null;
                     }
                     else
                     {
@@ -5621,7 +5662,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             if (!hasSubs)
             {
                 // OUTPUT nv12 surface(memory)
-                if (isSwEncoder && (doVkTonemap || isVaapiDecoder))
+                if (isSwEncoder && (doVkTonemap || isVaapiDecoder) && !spatialDownloadedToCpu)
                 {
                     mainFilters.Add("hwdownload");
                     mainFilters.Add("format=nv12");
@@ -5734,6 +5775,7 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             mainFilters.Add(GetOverwriteColorPropertiesParam(state, doOclTonemap));
 
+            var spatialDownloadedToCpu = false;
             var outFormat = string.Empty;
             if (isSwDecoder)
             {
@@ -5784,6 +5826,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                     // Spatial formats require SW filters (crop/v360) - download, process, upload back
                     var hwUpload = isVaapiEncoder ? "hwupload_vaapi" : null;
                     AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                    spatialDownloadedToCpu = hwUpload is null;
                 }
                 else
                 {
@@ -5845,7 +5888,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             var isHwmapNotUsable = hasGraphicalSubs || isUploadForOclTonemap;
             var isHwmapForSubs = hasSubs && isVaapiDecoder;
             var isHwUnmapForTextSubs = hasTextSubs && isVaInVaOut && !isUploadForOclTonemap;
-            if ((isVaapiDecoder && isSwEncoder) || isUploadForOclTonemap || isHwmapForSubs)
+            if (((isVaapiDecoder && isSwEncoder) || isUploadForOclTonemap || isHwmapForSubs) && !spatialDownloadedToCpu)
             {
                 memoryOutput = true;
 
@@ -5853,6 +5896,10 @@ namespace MediaBrowser.Controller.MediaEncoding
                 // prefer hwmap to hwdownload on opencl/vaapi.
                 mainFilters.Add(isHwmapNotUsable ? "hwdownload" : "hwmap");
                 mainFilters.Add("format=nv12");
+            }
+            else if (spatialDownloadedToCpu)
+            {
+                memoryOutput = true;
             }
 
             // OUTPUT nv12 surface(memory)
@@ -6019,11 +6066,13 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             // Check if we need spatial SW filters (3D formats except MVC)
             // Skip when Apple Media Profile is enabled - Vision Pro renders spatial content using VEXU metadata
+            var spatialDownloadedToCpu = false;
             if (threeDFormat.HasValue && threeDFormat.Value != Video3DFormat.MVC && !(state.BaseRequest?.EnableAppleMediaProfile ?? false))
             {
                 // Spatial formats require SW filters (crop/v360) - download, process, upload back
                 var hwUpload = isVtEncoder ? "hwupload" : null;
                 AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                spatialDownloadedToCpu = hwUpload is null;
             }
             else
             {
@@ -6080,7 +6129,7 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             if (usingHwSurface)
             {
-                if (!isVtEncoder)
+                if (!isVtEncoder && !spatialDownloadedToCpu)
                 {
                     mainFilters.Add("hwdownload");
                     mainFilters.Add("format=nv12");
@@ -6100,7 +6149,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                 mainFilters.Insert(0, "hwupload");
                 mainFilters.Insert(0, "format=nv12|p010le|videotoolbox_vld");
 
-                if (!isVtEncoder)
+                if (!isVtEncoder && !spatialDownloadedToCpu)
                 {
                     mainFilters.Add("hwdownload");
                     mainFilters.Add("format=nv12");
@@ -6199,6 +6248,8 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             mainFilters.Add(GetOverwriteColorPropertiesParam(state, doOclTonemap));
 
+            var spatialDownloadedToCpu = false;
+
             if (isSwDecoder)
             {
                 // INPUT sw surface(memory)
@@ -6245,6 +6296,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                     // Spatial formats require SW filters (crop/v360) - download, process, upload back
                     var hwUpload = isRkmppEncoder ? "hwupload=derive_device=rkmpp" : null;
                     AddSpatialFiltersForHwPipeline(mainFilters, state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH, "nv12", hwUpload);
+                    spatialDownloadedToCpu = hwUpload is null;
                 }
                 else
                 {
@@ -6313,13 +6365,17 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             var memoryOutput = false;
             var isUploadForOclTonemap = isSwDecoder && doOclTonemap;
-            if ((isRkmppDecoder && isSwEncoder) || isUploadForOclTonemap)
+            if (((isRkmppDecoder && isSwEncoder) || isUploadForOclTonemap) && !spatialDownloadedToCpu)
             {
                 memoryOutput = true;
 
                 // OUTPUT nv12 surface(memory)
                 mainFilters.Add("hwdownload");
                 mainFilters.Add("format=nv12");
+            }
+            else if (spatialDownloadedToCpu)
+            {
+                memoryOutput = true;
             }
 
             // OUTPUT nv12 surface(memory)
