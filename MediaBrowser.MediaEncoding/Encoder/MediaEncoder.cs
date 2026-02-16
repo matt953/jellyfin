@@ -1239,10 +1239,12 @@ namespace MediaBrowser.MediaEncoding.Encoder
             Directory.CreateDirectory(targetDirectory);
 
             // Build encoder-specific options
+            // All encoders need -bf 0 to disable B-frames for I-frame only playlists
             var encoderOptions = string.Empty;
             if (vidEncoder.Contains("videotoolbox", StringComparison.OrdinalIgnoreCase))
             {
-                encoderOptions = "-b:v 500k -qmin -1 -qmax -1 -allow_sw 1 -profile:v high -level 4.0 ";
+                // VideoToolbox: -bf 0 disables B-frames, -qmin/-qmax -1 uses encoder defaults
+                encoderOptions = "-bf 0 -b:v 500k -qmin -1 -qmax -1 -allow_sw 1 -profile:v high -level 4.0 ";
             }
             else if (vidEncoder.Contains("nvenc", StringComparison.OrdinalIgnoreCase))
             {
@@ -1250,16 +1252,31 @@ namespace MediaBrowser.MediaEncoding.Encoder
             }
             else if (vidEncoder.Contains("qsv", StringComparison.OrdinalIgnoreCase))
             {
-                encoderOptions = "-bf 0 -b:v 1000k -maxrate 1001k -bufsize 4000k -profile:v high -level 40 ";
+                encoderOptions = "-bf 0 -b:v 500k -maxrate 500k -bufsize 1000k -profile:v high -level 40 ";
             }
             else if (vidEncoder.Contains("vaapi", StringComparison.OrdinalIgnoreCase))
             {
                 encoderOptions = "-bf 0 -rc_mode VBR -b:v 500k -maxrate 500k -bufsize 1000k -profile:v high -level 40 ";
             }
+            else if (vidEncoder.Contains("amf", StringComparison.OrdinalIgnoreCase))
+            {
+                // AMD AMF encoder
+                encoderOptions = "-bf 0 -b:v 500k -maxrate 500k -bufsize 1000k -profile:v high -level 4.0 -quality speed ";
+            }
+            else if (vidEncoder.Contains("rkmpp", StringComparison.OrdinalIgnoreCase))
+            {
+                // RockChip MPP encoder
+                encoderOptions = "-bf 0 -b:v 500k -profile:v high -level 4.0 ";
+            }
+            else if (vidEncoder.Contains("v4l2m2m", StringComparison.OrdinalIgnoreCase))
+            {
+                // V4L2 M2M encoder (Raspberry Pi, etc.) - does not support -profile:v
+                encoderOptions = "-b:v 500k ";
+            }
             else
             {
                 // Software encoder (libx264)
-                encoderOptions = "-profile:v high -level 4.0 -preset fast ";
+                encoderOptions = "-bf 0 -profile:v high -level 4.0 -preset veryfast ";
             }
 
             // HLS I-frame arguments with fMP4 segments

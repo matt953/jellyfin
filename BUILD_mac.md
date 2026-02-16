@@ -70,9 +70,10 @@ rm -rf /opt/ffbuild/prefix/*
 rm -rf /opt/ffbuild/bin/*
 
 cd builder && export PATH="/opt/ffbuild/bin:/opt/homebrew/opt/nasm@2/bin:$PATH" && ./buildmac.sh arm64
-```
 
-Output: `artifacts/*.tar.xz` (extract with `tar -xJf` to get `ffmpeg` and `ffprobe`)
+# Extract the binaries
+cd artifacts && tar -xJf *.tar.xz
+```
 
 ---
 
