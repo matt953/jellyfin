@@ -20,13 +20,15 @@ Tested on Fedora 43 x86_64, Docker 29.1.5.
 sudo dnf install -y docker moby-engine docker-buildx
 sudo systemctl enable --now docker
 sudo usermod -aG docker $USER
-# Log out and back in for group to take effect
 
 # Debian/Ubuntu
 sudo apt-get install -y docker.io docker-buildx
 sudo usermod -aG docker $USER
-# Log out and back in for group to take effect
 ```
+
+After adding yourself to the `docker` group, either log out and back in, or use
+`sg docker -c "command"` to run Docker commands in the current session without
+re-logging. All commands in this guide use `sg docker -c` for Fedora.
 
 ## Directory Layout
 
@@ -54,7 +56,7 @@ git clone https://github.com/jellyfin/jellyfin-ffmpeg.git
 
 ```bash
 cd ~/Projects/jellyfin-ffmpeg/builder
-./makeimage.sh linux64 gpl
+sg docker -c "./makeimage.sh linux64 gpl"
 ```
 
 ### 3. Build ffmpeg (~10-20 min)
@@ -62,7 +64,7 @@ cd ~/Projects/jellyfin-ffmpeg/builder
 **Fedora/RHEL (SELinux):**
 ```bash
 cd ~/Projects/jellyfin-ffmpeg/builder
-./build_fedora.sh linux64 gpl
+sg docker -c "./build_fedora.sh linux64 gpl"
 ```
 
 **Debian/Ubuntu:**
@@ -77,7 +79,7 @@ Output: `builder/artifacts/jellyfin-ffmpeg_<version>_portable_linux64-gpl.tar.xz
 
 ```bash
 cd ~/Projects/jellyfin
-./build-docker-linux.sh --skip-ffmpeg
+sg docker -c "./build-docker-linux.sh --skip-ffmpeg"
 ```
 
 This builds the `jellyfin-dev` Docker image containing:
@@ -87,6 +89,18 @@ This builds the `jellyfin-dev` Docker image containing:
 
 ### 5. Run
 
+**Fedora/RHEL (SELinux + NAS mounts):**
+```bash
+cd ~/Projects/jellyfin
+sg docker -c "./run-jellyfin-dev_docker_fedora.sh"
+# Access at http://localhost:8096
+
+# Stop/logs:
+sg docker -c "./run-jellyfin-dev_docker_fedora.sh stop"
+sg docker -c "./run-jellyfin-dev_docker_fedora.sh logs"
+```
+
+**Debian/Ubuntu:**
 ```bash
 cd ~/Projects/jellyfin
 ./run-jellyfin-dev.sh docker
@@ -104,6 +118,10 @@ docker run -d --name jellyfin \
     jellyfin-dev
 ```
 
+> **Note:** On Fedora, use `sg docker -c "command"` to run Docker commands
+> if your shell session doesn't have the `docker` group active (e.g. after
+> `usermod -aG docker $USER` without logging out/in).
+
 ## Why build_fedora.sh?
 
 The upstream `build.sh` doesn't work on Fedora/RHEL because:
@@ -116,7 +134,7 @@ The upstream `build.sh` is left untouched and works on Debian/Ubuntu as-is.
 
 ## Troubleshooting
 
-- **Docker permission denied**: Make sure you're in the `docker` group and logged out/in.
+- **Docker permission denied**: Use `sg docker -c "command"` or log out/in after adding yourself to the `docker` group.
 - **GitHub 502 during makeimage.sh**: Transient — just re-run.
 - **Rebuilding after changing ffmpeg patches**: Delete `builder/artifacts/`, re-run step 3. No need to re-run `makeimage.sh`.
-- **Rebuilding after changing server/web code**: Just re-run step 4 (`build-docker-linux.sh --skip-ffmpeg`).
+- **Rebuilding after changing server/web code**: Just re-run step 4 (`sg docker -c "./build-docker-linux.sh --skip-ffmpeg"`).
