@@ -205,6 +205,12 @@ namespace MediaBrowser.Controller.MediaEncoding
         /// </summary>
         public bool EnableMvcDecoding { get; set; }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether to output multiple audio tracks as separate HLS variants.
+        /// When true, all audio streams are output with EXT-X-MEDIA tags for client-side track selection.
+        /// </summary>
+        public bool EnableMultiAudioTracks { get; set; }
+
         public string GetOption(string qualifier, string name)
         {
             var value = GetOption(qualifier + "-" + name);

@@ -183,6 +183,45 @@ namespace MediaBrowser.Controller.MediaEncoding
         [GeneratedRegex(@"\s+")]
         private static partial Regex WhiteSpaceRegex();
 
+        /// <summary>
+        /// Checks if an audio stream is lossless based on codec and profile.
+        /// Used for per-track codec selection in multi-audio HLS.
+        /// </summary>
+        /// <param name="stream">The audio stream to check.</param>
+        /// <returns>True if the source audio is lossless.</returns>
+        public static bool IsSourceAudioLossless(MediaStream stream)
+        {
+            if (stream is null)
+            {
+                return false;
+            }
+
+            var codec = stream.Codec?.ToLowerInvariant() ?? string.Empty;
+            var profile = stream.Profile?.ToLowerInvariant() ?? string.Empty;
+
+            // Standard lossless codecs (ALAC, FLAC, TrueHD, etc.)
+            if (LosslessAudioCodecs.Contains(codec))
+            {
+                return true;
+            }
+
+            // DTS-HD MA is lossless (Profile contains "MA" or "HD MA")
+            // Regular DTS and DTS-HD HRA are lossy
+            if (codec is "dts" or "dca")
+            {
+                return profile.Contains("ma", StringComparison.OrdinalIgnoreCase)
+                    && !profile.Contains("hra", StringComparison.OrdinalIgnoreCase);
+            }
+
+            // PCM variants are lossless
+            if (codec.StartsWith("pcm_", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
         public string GetH264Encoder(EncodingJobInfo state, EncodingOptions encodingOptions)
             => GetH26xOrAv1Encoder("libx264", "h264", state, encodingOptions);
 
@@ -789,6 +828,47 @@ namespace MediaBrowser.Controller.MediaEncoding
                 // its only benefit is a smaller file size.
                 // To prevent problems, use the ffmpeg native encoder instead.
                 return "alac";
+            }
+
+            return codec.ToLowerInvariant();
+        }
+
+        /// <summary>
+        /// Gets the audio encoder for a specific codec name.
+        /// </summary>
+        /// <param name="codec">The codec name (e.g., "aac", "ac3", "eac3").</param>
+        /// <returns>The FFmpeg encoder name.</returns>
+        public string GetAudioEncoderForCodec(string codec)
+        {
+            if (string.IsNullOrEmpty(codec))
+            {
+                codec = "aac";
+            }
+
+            if (string.Equals(codec, "aac", StringComparison.OrdinalIgnoreCase))
+            {
+                if (_mediaEncoder.SupportsEncoder("aac_at"))
+                {
+                    return "aac_at";
+                }
+
+                if (_mediaEncoder.SupportsEncoder("libfdk_aac"))
+                {
+                    return "libfdk_aac";
+                }
+
+                return "aac";
+            }
+
+            // ac3 and eac3 use native encoders
+            if (string.Equals(codec, "ac3", StringComparison.OrdinalIgnoreCase))
+            {
+                return "ac3";
+            }
+
+            if (string.Equals(codec, "eac3", StringComparison.OrdinalIgnoreCase))
+            {
+                return "eac3";
             }
 
             return codec.ToLowerInvariant();
@@ -1802,6 +1882,13 @@ namespace MediaBrowser.Controller.MediaEncoding
                 }
                 else if (string.Equals(state.ActualOutputVideoCodec, "h264", StringComparison.OrdinalIgnoreCase))
                 {
+                    // MVC decoding outputs side-by-side (doubled width), requiring at least level 5.1
+                    // 3840x1080 SBS output exceeds level 4.1's max frame size (8192 macroblocks)
+                    if (state.BaseRequest?.EnableMvcDecoding == true && requestLevel < 51)
+                    {
+                        return "51";
+                    }
+
                     // Transcode to level 5.1 and lower for maximum compatibility.
                     // h264 4k 30fps requires at least level 5.1 otherwise it will break on safari fmp4.
                     // https://en.wikipedia.org/wiki/Advanced_Video_Coding#Levels
@@ -2604,12 +2691,144 @@ namespace MediaBrowser.Controller.MediaEncoding
             return request.EnableAutoStreamCopy;
         }
 
+        /// <summary>
+        /// Gets HLS audio track info for all audio streams in the media source.
+        /// Used for multi-audio HLS output with separate audio variants.
+        /// Applies identical logic to standard flow (StreamingHelpers + TryStreamCopy) for each track.
+        /// </summary>
+        /// <param name="state">The encoding job info.</param>
+        /// <returns>List of audio track info for HLS output.</returns>
+        public List<HlsAudioTrackInfo> GetHlsAudioTracks(EncodingJobInfo state)
+        {
+            var tracks = new List<HlsAudioTrackInfo>();
+            var audioStreams = state.MediaSource?.MediaStreams?
+                .Where(s => s.Type == MediaStreamType.Audio)
+                .ToList() ?? new List<MediaStream>();
+
+            // Get encoding options for HLS audio seek strategy check
+            // Matches TryStreamCopy lines 7604-7607
+            var encodingOptions = _configurationManager.GetEncodingOptions();
+            var preventHlsAudioCopy = state.TranscodingType is TranscodingJobType.Hls
+                && state.VideoStream is not null
+                && !IsCopyCodec(state.OutputVideoCodec)
+                && encodingOptions.HlsAudioSeekStrategy is HlsAudioSeekStrategy.TranscodeAudio;
+
+            int outputIndex = 0;
+            foreach (var stream in audioStreams)
+            {
+                var sourceCodec = stream.Codec?.ToLowerInvariant() ?? "unknown";
+                var channels = stream.Channels ?? 2;
+
+                var track = new HlsAudioTrackInfo
+                {
+                    StreamIndex = stream.Index,
+                    OutputIndex = outputIndex++,
+                    Language = stream.Language,
+                    Title = stream.Title,
+                    Codec = sourceCodec,
+                    Channels = channels,
+                    IsDefault = stream.IsDefault,
+                };
+
+                // Step 1: Check if can copy (TryStreamCopy lines 7609-7611)
+                var canCopy = CanStreamCopyAudio(state, stream, state.SupportedAudioCodecs) && !preventHlsAudioCopy;
+
+                // Step 2: Check user permission (TryStreamCopy lines 7617-7623)
+                var user = state.User;
+                var forceCopyDueToPermission = user is not null && !user.HasPermission(PermissionKind.EnableAudioPlaybackTranscoding);
+
+                if (canCopy || forceCopyDueToPermission)
+                {
+                    // Copy - use source codec
+                    track.RequiresTranscode = false;
+                    track.HlsCodec = sourceCodec;
+                    track.HlsCodecString = GetHlsAudioCodecString(sourceCodec, channels);
+                }
+                else
+                {
+                    // Must transcode
+                    track.RequiresTranscode = true;
+
+                    // Smart per-track codec selection based on source quality
+                    var isSourceLossless = IsSourceAudioLossless(stream);
+                    string transcodeCodec;
+
+                    if (isSourceLossless)
+                    {
+                        // Lossless source (TrueHD, DTS-HD MA, FLAC, etc.) → prefer lossless output (ALAC, FLAC)
+                        transcodeCodec = state.SupportedAudioCodecs
+                            .Where(c => LosslessAudioCodecs.Contains(c))
+                            .FirstOrDefault(_mediaEncoder.CanEncodeToAudioCodec)
+                            // Fallback to any supported codec if client doesn't support lossless
+                            ?? state.SupportedAudioCodecs.FirstOrDefault(_mediaEncoder.CanEncodeToAudioCodec)
+                            ?? state.SupportedAudioCodecs.FirstOrDefault();
+                    }
+                    else
+                    {
+                        // Lossy source (AC3, AAC, DTS, MP3) → prefer lossy output (AAC, AC3, EAC3)
+                        transcodeCodec = state.SupportedAudioCodecs
+                            .Where(c => !LosslessAudioCodecs.Contains(c))
+                            .FirstOrDefault(_mediaEncoder.CanEncodeToAudioCodec)
+                            // Fallback to any supported codec if no lossy available
+                            ?? state.SupportedAudioCodecs.FirstOrDefault(_mediaEncoder.CanEncodeToAudioCodec)
+                            ?? state.SupportedAudioCodecs.FirstOrDefault();
+                    }
+
+                    // Edge case: if picked codec == source codec, transcoding same→same is pointless
+                    if (string.Equals(sourceCodec, transcodeCodec, StringComparison.OrdinalIgnoreCase))
+                    {
+                        transcodeCodec = state.SupportedAudioCodecs
+                            .Where(c => !string.Equals(c, sourceCodec, StringComparison.OrdinalIgnoreCase))
+                            .FirstOrDefault(_mediaEncoder.CanEncodeToAudioCodec)
+                            ?? transcodeCodec; // Keep original if no alternative found
+                    }
+
+                    track.HlsCodec = transcodeCodec;
+                    track.HlsCodecString = GetHlsAudioCodecString(transcodeCodec, channels);
+                }
+
+                tracks.Add(track);
+            }
+
+            // Ensure at least one default
+            if (tracks.Count > 0 && !tracks.Any(t => t.IsDefault))
+            {
+                tracks[0].IsDefault = true;
+            }
+
+            return tracks;
+        }
+
+        /// <summary>
+        /// Gets the HLS codec string for a given audio codec.
+        /// </summary>
+        private static string GetHlsAudioCodecString(string codec, int channels)
+        {
+            return codec switch
+            {
+                "aac" => channels <= 2 ? "mp4a.40.2" : "mp4a.40.5",
+                "ac3" => "ac-3",
+                "eac3" => "ec-3",
+                "mp3" => "mp4a.40.34",
+                "flac" => "fLaC",
+                "alac" => "alac",
+                "opus" => "Opus",
+                _ => "mp4a.40.2"
+            };
+        }
+
         public int GetVideoBitrateParamValue(BaseEncodingJobOptions request, MediaStream videoStream, string outputVideoCodec)
         {
             var bitrate = request.VideoBitRate;
 
             if (videoStream is not null)
             {
+                // If no bitrate specified, use source bitrate as fallback
+                if (!bitrate.HasValue && videoStream.BitRate.HasValue)
+                {
+                    bitrate = videoStream.BitRate.Value;
+                }
+
                 var isUpscaling = request.Height.HasValue
                     && videoStream.Height.HasValue
                     && request.Height.Value > videoStream.Height.Value
@@ -2637,22 +2856,27 @@ namespace MediaBrowser.Controller.MediaEncoding
             }
 
             // Cap the max target bitrate to intMax/2 to satisfy the bufsize=bitrate*2.
-            return Math.Min(bitrate ?? 0, int.MaxValue / 2);
+            // If no bitrate available, use a reasonable default (20 Mbps) to avoid 0 bitrate causing FFmpeg to crash
+            return Math.Min(bitrate ?? 20000000, int.MaxValue / 2);
         }
 
         private int GetMinBitrate(int sourceBitrate, int requestedBitrate)
         {
             // these values were chosen from testing to improve low bitrate streams
+            // Use long to avoid overflow when multiplying high bitrate values
+            long adjustedBitrate = sourceBitrate;
             if (sourceBitrate <= 2000000)
             {
-                sourceBitrate = Convert.ToInt32(sourceBitrate * 2.5);
+                adjustedBitrate = (long)(sourceBitrate * 2.5);
             }
             else if (sourceBitrate <= 3000000)
             {
-                sourceBitrate *= 2;
+                adjustedBitrate = (long)sourceBitrate * 2;
             }
 
-            var bitrate = Math.Min(sourceBitrate, requestedBitrate);
+            // Clamp to int.MaxValue to avoid overflow
+            var clampedBitrate = (int)Math.Min(adjustedBitrate, int.MaxValue);
+            var bitrate = Math.Min(clampedBitrate, requestedBitrate);
 
             return bitrate;
         }
@@ -2707,7 +2931,9 @@ namespace MediaBrowser.Controller.MediaEncoding
                 scaleFactor = 1;
             }
 
-            return Convert.ToInt32(scaleFactor * bitrate);
+            // Use long to avoid overflow when multiplying high bitrate values, then clamp to int.MaxValue
+            var scaledBitrate = (long)(scaleFactor * bitrate);
+            return (int)Math.Min(scaledBitrate, int.MaxValue);
         }
 
         public int? GetAudioBitrateParam(BaseEncodingJobOptions request, MediaStream audioStream, int? outputAudioChannels)
@@ -3039,7 +3265,18 @@ namespace MediaBrowser.Controller.MediaEncoding
                 args += "-vn";
             }
 
-            if (state.AudioStream is not null)
+            // Multi-audio: map all audio streams for separate HLS audio variants
+            if (state.BaseRequest?.EnableMultiAudioTracks == true && state.HlsAudioTracks?.Count > 0)
+            {
+                foreach (var track in state.HlsAudioTracks)
+                {
+                    args += string.Format(
+                        CultureInfo.InvariantCulture,
+                        " -map 0:{0}",
+                        track.StreamIndex);
+                }
+            }
+            else if (state.AudioStream is not null)
             {
                 int audioStreamIndex = FindIndex(state.MediaSource.MediaStreams, state.AudioStream);
                 if (state.AudioStream.IsExternal)
@@ -8087,6 +8324,62 @@ namespace MediaBrowser.Controller.MediaEncoding
             args += GetAudioFilterParam(state, encodingOptions);
 
             return args;
+        }
+
+        /// <summary>
+        /// Gets audio encoding arguments for multi-audio HLS output.
+        /// Each audio track gets its own codec/bitrate/channels settings.
+        /// </summary>
+        /// <param name="state">The encoding job info with HlsAudioTracks populated.</param>
+        /// <returns>FFmpeg audio encoding arguments for all tracks.</returns>
+        public string GetMultiAudioArguments(EncodingJobInfo state)
+        {
+            if (state.HlsAudioTracks is null || state.HlsAudioTracks.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            var args = new StringBuilder();
+
+            foreach (var track in state.HlsAudioTracks)
+            {
+                if (track.RequiresTranscode)
+                {
+                    // Use the codec determined by GetHlsAudioTracks (aac, ac3, or eac3)
+                    var encoder = GetAudioEncoderForCodec(track.HlsCodec);
+                    args.Append(CultureInfo.InvariantCulture, $" -codec:a:{track.OutputIndex} {encoder}");
+
+                    // Channel limits: AAC/AC3 max 6, EAC3 up to 16
+                    var maxChannels = string.Equals(track.HlsCodec, "eac3", StringComparison.OrdinalIgnoreCase) ? 16 : 6;
+                    var channels = Math.Min(track.Channels, maxChannels);
+                    args.Append(CultureInfo.InvariantCulture, $" -ac:a:{track.OutputIndex} {channels}");
+
+                    // Set bitrate based on channels and codec
+                    string bitrate;
+                    if (string.Equals(track.HlsCodec, "eac3", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bitrate = channels <= 2 ? "192k" : "640k";
+                    }
+                    else if (string.Equals(track.HlsCodec, "ac3", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bitrate = channels <= 2 ? "192k" : "384k";
+                    }
+                    else
+                    {
+                        // AAC
+                        bitrate = channels <= 2 ? "128k" : "384k";
+                    }
+
+                    args.Append(CultureInfo.InvariantCulture, $" -ab:a:{track.OutputIndex} {bitrate}");
+                }
+                else
+                {
+                    // Copy codec (passthrough)
+                    args.Append(CultureInfo.InvariantCulture, $" -codec:a:{track.OutputIndex} copy");
+                }
+            }
+
+            return args.ToString();
         }
 
         public string GetProgressiveAudioFullCommandLine(EncodingJobInfo state, EncodingOptions encodingOptions, string outputPath)

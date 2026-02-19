@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Security.Claims;
@@ -160,7 +161,9 @@ public class DynamicHlsHelper
         var queryString = _httpContextAccessor.HttpContext.Request.QueryString.ToString();
 
         // from universal audio service, need to override the AudioCodec when the actual request differs from original query
-        if (!string.Equals(state.OutputAudioCodec, _httpContextAccessor.HttpContext.Request.Query["AudioCodec"].ToString(), StringComparison.OrdinalIgnoreCase))
+        // Skip this for multi-audio: we need to preserve the full codec list for per-track codec selection
+        if (!streamingRequest.EnableMultiAudioTracks
+            && !string.Equals(state.OutputAudioCodec, _httpContextAccessor.HttpContext.Request.Query["AudioCodec"].ToString(), StringComparison.OrdinalIgnoreCase))
         {
             var newQuery = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(queryString);
             newQuery["AudioCodec"] = state.OutputAudioCodec;
@@ -193,7 +196,17 @@ public class DynamicHlsHelper
         }
 
         // Main stream
+        var outputFileNameWithoutExtension = Path.GetFileNameWithoutExtension(state.OutputFilePath);
         var baseUrl = isLiveStream ? "live.m3u8" : "main.m3u8";
+
+        // Multi-audio: add audio group and EXT-X-MEDIA tags for audio tracks
+        string? audioGroup = null;
+        if (streamingRequest.EnableMultiAudioTracks && state.HlsAudioTracks?.Count > 0)
+        {
+            audioGroup = "audio";
+            AddAudioTracks(state, builder, _httpContextAccessor.HttpContext.User, outputFileNameWithoutExtension, queryString);
+        }
+
         var playlistUrl = baseUrl + queryString;
         var playlistQuery = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(queryString);
 
@@ -217,7 +230,7 @@ public class DynamicHlsHelper
             AddSubtitles(state, subtitleStreams, builder, _httpContextAccessor.HttpContext.User);
         }
 
-        var basicPlaylist = AppendPlaylist(builder, state, playlistUrl, totalBitrate, subtitleGroup);
+        var basicPlaylist = AppendPlaylist(builder, state, playlistUrl, totalBitrate, subtitleGroup, audioGroup);
 
         if (state.VideoStream is not null && state.VideoRequest is not null)
         {
@@ -249,7 +262,7 @@ public class DynamicHlsHelper
                     var sdrVideoUrl = Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString(baseUrl, sdrPlaylistQuery);
 
                     // HACK: Use the same bitrate so that the client can choose by other attributes, such as color range.
-                    AppendPlaylist(builder, state, sdrVideoUrl, totalBitrate, subtitleGroup);
+                    AppendPlaylist(builder, state, sdrVideoUrl, totalBitrate, subtitleGroup, audioGroup);
 
                     // Restore the video codec
                     state.OutputVideoCodec = "copy";
@@ -270,7 +283,7 @@ public class DynamicHlsHelper
                 var sdrVideoUrl = Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString(baseUrl, sdrPlaylistQuery);
 
                 // HACK: Use the same bitrate so that the client can choose by other attributes, such as color range.
-                AppendPlaylist(builder, state, sdrVideoUrl, totalBitrate, subtitleGroup);
+                AppendPlaylist(builder, state, sdrVideoUrl, totalBitrate, subtitleGroup, audioGroup);
 
                 // Restore the video codec
                 state.OutputVideoCodec = "copy";
@@ -312,13 +325,13 @@ public class DynamicHlsHelper
             var variantQuery = playlistQuery;
             variantQuery["VideoBitrate"] = (requestedVideoBitrate - variation).ToString(CultureInfo.InvariantCulture);
             var variantUrl = Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString(baseUrl, variantQuery);
-            AppendPlaylist(builder, state, variantUrl, newBitrate, subtitleGroup);
+            AppendPlaylist(builder, state, variantUrl, newBitrate, subtitleGroup, audioGroup);
 
             variation *= 2;
             newBitrate = totalBitrate - variation;
             variantQuery["VideoBitrate"] = (requestedVideoBitrate - variation).ToString(CultureInfo.InvariantCulture);
             variantUrl = Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString(baseUrl, variantQuery);
-            AppendPlaylist(builder, state, variantUrl, newBitrate, subtitleGroup);
+            AppendPlaylist(builder, state, variantUrl, newBitrate, subtitleGroup, audioGroup);
         }
 
         if (!isLiveStream && (state.VideoRequest?.EnableTrickplay ?? false))
@@ -338,7 +351,7 @@ public class DynamicHlsHelper
         return new FileContentResult(Encoding.UTF8.GetBytes(builder.ToString()), MimeTypes.GetMimeType("playlist.m3u8"));
     }
 
-    private StringBuilder AppendPlaylist(StringBuilder builder, StreamState state, string url, int bitrate, string? subtitleGroup)
+    private StringBuilder AppendPlaylist(StringBuilder builder, StreamState state, string url, int bitrate, string? subtitleGroup, string? audioGroup = null)
     {
         var playlistBuilder = new StringBuilder();
         playlistBuilder.Append("#EXT-X-STREAM-INF:BANDWIDTH=")
@@ -358,6 +371,13 @@ public class DynamicHlsHelper
 
         AppendPlaylistReqVideoLayoutField(playlistBuilder, state);
 
+        if (!string.IsNullOrWhiteSpace(audioGroup))
+        {
+            playlistBuilder.Append(",AUDIO=\"")
+                .Append(audioGroup)
+                .Append('"');
+        }
+
         if (!string.IsNullOrWhiteSpace(subtitleGroup))
         {
             playlistBuilder.Append(",SUBTITLES=\"")
@@ -375,7 +395,7 @@ public class DynamicHlsHelper
     /// <summary>
     /// Appends a VIDEO-RANGE field containing the range of the output video stream.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
     /// <param name="state">StreamState of the current stream.</param>
     private void AppendPlaylistVideoRangeField(StringBuilder builder, StreamState state)
@@ -417,7 +437,7 @@ public class DynamicHlsHelper
     /// Appends a CODECS field containing formatted strings of
     /// the active streams output video and audio codecs.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <seealso cref="GetPlaylistVideoCodecs(StreamState, string, int)"/>
     /// <seealso cref="GetPlaylistAudioCodecs(StreamState)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
@@ -462,7 +482,7 @@ public class DynamicHlsHelper
     /// Appends a SUPPLEMENTAL-CODECS field containing formatted strings of
     /// the active streams output Dolby Vision Videos.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <seealso cref="GetPlaylistVideoCodecs(StreamState, string, int)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
     /// <param name="state">StreamState of the current stream.</param>
@@ -534,7 +554,7 @@ public class DynamicHlsHelper
     /// <summary>
     /// Appends a RESOLUTION field containing the resolution of the output stream.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
     /// <param name="state">StreamState of the current stream.</param>
     private void AppendPlaylistResolutionField(StringBuilder builder, StreamState state)
@@ -551,7 +571,7 @@ public class DynamicHlsHelper
     /// <summary>
     /// Appends a FRAME-RATE field containing the framerate of the output stream.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
     /// <param name="state">StreamState of the current stream.</param>
     private void AppendPlaylistFramerateField(StringBuilder builder, StreamState state)
@@ -577,7 +597,7 @@ public class DynamicHlsHelper
     /// Appends a REQ-VIDEO-LAYOUT field for spatial/3D video content.
     /// This enables proper playback on Apple Vision Pro and other spatial video devices.
     /// </summary>
-    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string)"/>
+    /// <seealso cref="AppendPlaylist(StringBuilder, StreamState, string, int, string, string)"/>
     /// <param name="builder">StringBuilder to append the field to.</param>
     /// <param name="state">StreamState of the current stream.</param>
     private void AppendPlaylistReqVideoLayoutField(StringBuilder builder, StreamState state)
@@ -685,6 +705,69 @@ public class DynamicHlsHelper
                 isForced ? "YES" : "NO",
                 url,
                 stream.Language ?? "Unknown");
+
+            builder.AppendLine(line);
+        }
+    }
+
+    /// <summary>
+    /// Adds EXT-X-MEDIA tags for audio tracks when multi-audio is enabled.
+    /// </summary>
+    /// <param name="state">The stream state.</param>
+    /// <param name="builder">The string builder to append to.</param>
+    /// <param name="user">The user for API key.</param>
+    /// <param name="playlistId">The playlist ID (output file name without extension).</param>
+    /// <param name="queryString">The query string to append to audio playlist URLs.</param>
+    private void AddAudioTracks(StreamState state, StringBuilder builder, ClaimsPrincipal user, string playlistId, string queryString)
+    {
+        if (state.HlsAudioTracks is null || state.HlsAudioTracks.Count == 0)
+        {
+            return;
+        }
+
+        const string Format = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{0}\",DEFAULT={1},AUTOSELECT={2},LANGUAGE=\"{3}\",URI=\"{4}\"";
+
+        // Track name+language occurrences to add suffix for duplicates
+        // Same name with different languages is OK (e.g. "Surround 5.1" English vs French)
+        var nameLanguageCount = new Dictionary<(string Name, string Language), int>();
+
+        foreach (var track in state.HlsAudioTracks)
+        {
+            var baseName = !string.IsNullOrEmpty(track.Title)
+                ? track.Title
+                : !string.IsNullOrEmpty(track.Language)
+                    ? track.Language.ToUpperInvariant()
+                    : $"Audio {track.OutputIndex + 1}";
+
+            var language = track.Language ?? "und";
+            var key = (baseName.ToUpperInvariant(), language.ToUpperInvariant());
+
+            // Add suffix for duplicate name+language combinations
+            string name;
+            if (nameLanguageCount.TryGetValue(key, out var count))
+            {
+                nameLanguageCount[key] = count + 1;
+                name = $"{baseName} ({count + 1})";
+            }
+            else
+            {
+                nameLanguageCount[key] = 1;
+                name = baseName;
+            }
+
+            var isDefault = track.IsDefault;
+
+            // URL for audio playlist - uses same pattern as main.m3u8
+            var url = $"audio_{track.StreamIndex}.m3u8{queryString}";
+
+            var line = string.Format(
+                CultureInfo.InvariantCulture,
+                Format,
+                name,
+                isDefault ? "YES" : "NO",
+                isDefault ? "YES" : "NO",
+                language,
+                url);
 
             builder.AppendLine(line);
         }

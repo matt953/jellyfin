@@ -67,6 +67,13 @@ public class DynamicHlsPlaylistGenerator : IDynamicHlsPlaylistGenerator
 
         var index = 0;
 
+        // Multi-audio: use separate method to keep standard flow unchanged
+        if (request.EnableMultiAudio && !string.IsNullOrEmpty(request.PlaylistId) && !string.IsNullOrEmpty(request.StreamName))
+        {
+            return CreateMultiAudioPlaylist(request, segments, builder, hlsVersion);
+        }
+
+        // Standard flow below - unchanged from upstream
         if (isHlsInFmp4)
         {
             // Init file that only includes fMP4 headers
@@ -104,6 +111,59 @@ public class DynamicHlsPlaylistGenerator : IDynamicHlsPlaylistGenerator
 
         builder.AppendLine("#EXT-X-ENDLIST");
 
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// Creates a playlist for multi-audio mode with var_stream_map segment naming.
+    /// This is a separate method to keep the standard flow in CreateMainPlaylist unchanged.
+    /// </summary>
+    private static string CreateMultiAudioPlaylist(CreateMainPlaylistRequest request, IReadOnlyList<double> segments, StringBuilder builder, string hlsVersion)
+    {
+        var hasQueryString = !string.IsNullOrEmpty(request.QueryString);
+        var queryStart = hasQueryString ? request.QueryString + "&" : "?";
+
+        // Init file - FFmpeg outputs {playlistId}_{streamName}_init.mp4
+        builder.Append("#EXT-X-MAP:URI=\"")
+            .Append(request.EndpointPrefix)
+            .Append(request.PlaylistId)
+            .Append('_')
+            .Append(request.StreamName)
+            .Append("_init.mp4")
+            .Append(request.QueryString)
+            .Append("&runtimeTicks=0&actualSegmentLengthTicks=0")
+            .Append('"')
+            .AppendLine();
+
+        long currentRuntimeTicks = 0;
+        var index = 0;
+        foreach (var length in segments)
+        {
+            var lengthTicks = Convert.ToInt64(length * TimeSpan.TicksPerSecond);
+            builder.Append("#EXTINF:")
+                .Append(length.ToString("0.000000", CultureInfo.InvariantCulture))
+                .AppendLine(", nodesc")
+                .Append(request.EndpointPrefix)
+                .Append(request.PlaylistId)
+                .Append('_')
+                .Append(request.StreamName)
+                .Append("_seg_")
+                .Append(index.ToString("D5", CultureInfo.InvariantCulture))
+                .Append(".m4s")
+                .Append(queryStart)
+                .Append("segmentIndex=")
+                .Append(index)
+                .Append("&runtimeTicks=")
+                .Append(currentRuntimeTicks)
+                .Append("&actualSegmentLengthTicks=")
+                .Append(lengthTicks)
+                .AppendLine();
+
+            currentRuntimeTicks += lengthTicks;
+            index++;
+        }
+
+        builder.AppendLine("#EXT-X-ENDLIST");
         return builder.ToString();
     }
 

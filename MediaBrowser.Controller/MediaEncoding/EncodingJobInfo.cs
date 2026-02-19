@@ -124,6 +124,11 @@ namespace MediaBrowser.Controller.MediaEncoding
 
         public MediaStream AudioStream { get; set; }
 
+        /// <summary>
+        /// Gets or sets the list of audio tracks for multi-audio HLS output.
+        /// </summary>
+        public List<HlsAudioTrackInfo> HlsAudioTracks { get; set; }
+
         public string[] SupportedAudioCodecs { get; set; }
 
         public string[] SupportedVideoCodecs { get; set; }

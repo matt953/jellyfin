@@ -166,6 +166,7 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <param name="alwaysBurnInSubtitleWhenTranscoding">Whether to always burn in subtitles when transcoding.</param>
     /// <param name="apmp">Optional. Whether to enable Apple Projected Media Profile for spatial video.</param>
     /// <param name="mvc">Optional. Whether to enable MVC decoding for stereoscopic 3D Blu-ray content.</param>
+    /// <param name="multiAudio">Optional. Whether to output multiple audio tracks as separate HLS variants.</param>
     /// <response code="200">Hls live stream retrieved.</response>
     /// <returns>A <see cref="FileResult"/> containing the hls file.</returns>
     [HttpGet("Videos/{itemId}/live.m3u8")]
@@ -226,7 +227,8 @@ public class DynamicHlsController : BaseJellyfinApiController
         [FromQuery] bool enableAudioVbrEncoding = true,
         [FromQuery] bool alwaysBurnInSubtitleWhenTranscoding = false,
         [FromQuery] bool apmp = false,
-        [FromQuery] bool mvc = false)
+        [FromQuery] bool mvc = false,
+        [FromQuery] bool multiAudio = false)
     {
         VideoRequestDto streamingRequest = new VideoRequestDto
         {
@@ -283,7 +285,8 @@ public class DynamicHlsController : BaseJellyfinApiController
             EnableAudioVbrEncoding = enableAudioVbrEncoding,
             AlwaysBurnInSubtitleWhenTranscoding = alwaysBurnInSubtitleWhenTranscoding,
             EnableAppleMediaProfile = apmp,
-            EnableMvcDecoding = mvc
+            EnableMvcDecoding = mvc,
+            EnableMultiAudioTracks = multiAudio
         };
 
         // CTS lifecycle is managed internally.
@@ -336,7 +339,12 @@ public class DynamicHlsController : BaseJellyfinApiController
                     minSegments = state.MinSegments;
                     if (minSegments > 0)
                     {
-                        await HlsHelpers.WaitForMinimumSegmentCount(playlistPath, minSegments, _logger, cancellationToken).ConfigureAwait(false);
+                        // For multi-audio mode with var_stream_map, FFmpeg writes variant playlists separately.
+                        // The master playlist doesn't contain #EXTINF entries, so we need to wait on the video variant playlist.
+                        var waitPlaylistPath = streamingRequest.EnableMultiAudioTracks && state.HlsAudioTracks?.Count > 0
+                            ? Path.Combine(Path.GetDirectoryName(playlistPath) ?? string.Empty, Path.GetFileNameWithoutExtension(playlistPath) + "_stream_video.m3u8")
+                            : playlistPath;
+                        await HlsHelpers.WaitForMinimumSegmentCount(waitPlaylistPath, minSegments, _logger, cancellationToken).ConfigureAwait(false);
                     }
                 }
             }
@@ -412,6 +420,7 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <param name="alwaysBurnInSubtitleWhenTranscoding">Whether to always burn in subtitles when transcoding.</param>
     /// <param name="apmp">Optional. Whether to enable Apple Projected Media Profile for spatial video.</param>
     /// <param name="mvc">Optional. Whether to enable MVC decoding for stereoscopic 3D Blu-ray content.</param>
+    /// <param name="multiAudio">Optional. Whether to output multiple audio tracks as separate HLS variants.</param>
     /// <response code="200">Video stream returned.</response>
     /// <returns>A <see cref="FileResult"/> containing the playlist file.</returns>
     [HttpGet("Videos/{itemId}/master.m3u8")]
@@ -473,7 +482,8 @@ public class DynamicHlsController : BaseJellyfinApiController
         [FromQuery] bool enableAudioVbrEncoding = true,
         [FromQuery] bool alwaysBurnInSubtitleWhenTranscoding = false,
         [FromQuery] bool apmp = false,
-        [FromQuery] bool mvc = false)
+        [FromQuery] bool mvc = false,
+        [FromQuery] bool multiAudio = false)
     {
         var streamingRequest = new HlsVideoRequestDto
         {
@@ -530,7 +540,8 @@ public class DynamicHlsController : BaseJellyfinApiController
             EnableAudioVbrEncoding = enableAudioVbrEncoding,
             AlwaysBurnInSubtitleWhenTranscoding = alwaysBurnInSubtitleWhenTranscoding,
             EnableAppleMediaProfile = apmp,
-            EnableMvcDecoding = mvc
+            EnableMvcDecoding = mvc,
+            EnableMultiAudioTracks = multiAudio
         };
 
         return await _dynamicHlsHelper.GetMasterHlsPlaylist(TranscodingJobType, streamingRequest, enableAdaptiveBitrateStreaming).ConfigureAwait(false);
@@ -707,6 +718,7 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// Gets a video stream using HTTP live streaming.
     /// </summary>
     /// <param name="itemId">The item id.</param>
+    /// <param name="variantStreamIndex">Optional. The audio variant stream index for multi-audio playlists.</param>
     /// <param name="static">Optional. If true, the original file will be streamed statically without any encoding. Use either no url extension or the original file extension. true/false.</param>
     /// <param name="params">The streaming parameters.</param>
     /// <param name="tag">The tag.</param>
@@ -759,13 +771,16 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <param name="alwaysBurnInSubtitleWhenTranscoding">Whether to always burn in subtitles when transcoding.</param>
     /// <param name="apmp">Optional. Whether to enable Apple Projected Media Profile for spatial video.</param>
     /// <param name="mvc">Optional. Whether to enable MVC decoding for stereoscopic 3D Blu-ray content.</param>
+    /// <param name="multiAudio">Optional. Whether to output multiple audio tracks as separate HLS variants.</param>
     /// <response code="200">Video stream returned.</response>
     /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
     [HttpGet("Videos/{itemId}/main.m3u8")]
+    [HttpGet("Videos/{itemId}/audio_{variantStreamIndex}.m3u8")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesPlaylistFile]
     public async Task<ActionResult> GetVariantHlsVideoPlaylist(
         [FromRoute, Required] Guid itemId,
+        [FromRoute] int? variantStreamIndex,
         [FromQuery] bool? @static,
         [FromQuery] string? @params,
         [FromQuery] string? tag,
@@ -817,7 +832,8 @@ public class DynamicHlsController : BaseJellyfinApiController
         [FromQuery] bool enableAudioVbrEncoding = true,
         [FromQuery] bool alwaysBurnInSubtitleWhenTranscoding = false,
         [FromQuery] bool apmp = false,
-        [FromQuery] bool mvc = false)
+        [FromQuery] bool mvc = false,
+        [FromQuery] bool multiAudio = false)
     {
         using var cancellationTokenSource = new CancellationTokenSource();
         var streamingRequest = new VideoRequestDto
@@ -873,11 +889,23 @@ public class DynamicHlsController : BaseJellyfinApiController
             EnableAudioVbrEncoding = enableAudioVbrEncoding,
             AlwaysBurnInSubtitleWhenTranscoding = alwaysBurnInSubtitleWhenTranscoding,
             EnableAppleMediaProfile = apmp,
-            EnableMvcDecoding = mvc
+            EnableMvcDecoding = mvc,
+            EnableMultiAudioTracks = multiAudio
         };
 
-        return await GetVariantPlaylistInternal(streamingRequest, cancellationTokenSource)
-            .ConfigureAwait(false);
+        // Multi-audio: use separate method for audio variant playlists
+        if (streamingRequest.EnableMultiAudioTracks && variantStreamIndex.HasValue)
+        {
+            return await GetMultiAudioVariantPlaylist(streamingRequest, cancellationTokenSource, $"audio_{variantStreamIndex}").ConfigureAwait(false);
+        }
+
+        // Multi-audio video playlist also needs special handling
+        if (streamingRequest.EnableMultiAudioTracks)
+        {
+            return await GetMultiAudioVariantPlaylist(streamingRequest, cancellationTokenSource, "video").ConfigureAwait(false);
+        }
+
+        return await GetVariantPlaylistInternal(streamingRequest, cancellationTokenSource).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1051,6 +1079,7 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <param name="itemId">The item id.</param>
     /// <param name="playlistId">The playlist id.</param>
     /// <param name="segmentId">The segment id.</param>
+    /// <param name="fileName">Optional. The segment filename for multi-audio mode.</param>
     /// <param name="container">The video container. Possible values are: ts, webm, asf, wmv, ogv, mp4, m4v, mkv, mpeg, mpg, avi, 3gp, wmv, wtv, m2ts, mov, iso, flv. </param>
     /// <param name="runtimeTicks">The position of the requested segment in ticks.</param>
     /// <param name="actualSegmentLengthTicks">The length of the requested segment in ticks.</param>
@@ -1106,19 +1135,22 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <param name="alwaysBurnInSubtitleWhenTranscoding">Whether to always burn in subtitles when transcoding.</param>
     /// <param name="apmp">Optional. Whether to enable Apple Projected Media Profile for spatial video.</param>
     /// <param name="mvc">Optional. Whether to enable MVC decoding for stereoscopic 3D Blu-ray content.</param>
+    /// <param name="multiAudio">Optional. Whether to output multiple audio tracks as separate HLS variants.</param>
     /// <response code="200">Video stream returned.</response>
     /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
     [HttpGet("Videos/{itemId}/hls1/{playlistId}/{segmentId}.{container}")]
+    [HttpGet("Videos/{itemId}/hls1/multi/{fileName}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesVideoFile]
     [SuppressMessage("Microsoft.Performance", "CA1801:ReviewUnusedParameters", MessageId = "playlistId", Justification = "Imported from ServiceStack")]
     public async Task<ActionResult> GetHlsVideoSegment(
         [FromRoute, Required] Guid itemId,
-        [FromRoute, Required] string playlistId,
-        [FromRoute, Required] int segmentId,
-        [FromRoute, Required][RegularExpression(EncodingHelper.ContainerValidationRegex)] string container,
-        [FromQuery, Required] long runtimeTicks,
-        [FromQuery, Required] long actualSegmentLengthTicks,
+        [FromRoute] string? playlistId,
+        [FromRoute] int? segmentId,
+        [FromRoute] string? fileName,
+        [FromRoute][RegularExpression(EncodingHelper.ContainerValidationRegex)] string? container,
+        [FromQuery] long runtimeTicks,
+        [FromQuery] long actualSegmentLengthTicks,
         [FromQuery] bool? @static,
         [FromQuery] string? @params,
         [FromQuery] string? tag,
@@ -1170,7 +1202,8 @@ public class DynamicHlsController : BaseJellyfinApiController
         [FromQuery] bool enableAudioVbrEncoding = true,
         [FromQuery] bool alwaysBurnInSubtitleWhenTranscoding = false,
         [FromQuery] bool apmp = false,
-        [FromQuery] bool mvc = false)
+        [FromQuery] bool mvc = false,
+        [FromQuery] bool multiAudio = false)
     {
         var streamingRequest = new VideoRequestDto
         {
@@ -1228,11 +1261,24 @@ public class DynamicHlsController : BaseJellyfinApiController
             EnableAudioVbrEncoding = enableAudioVbrEncoding,
             AlwaysBurnInSubtitleWhenTranscoding = alwaysBurnInSubtitleWhenTranscoding,
             EnableAppleMediaProfile = apmp,
-            EnableMvcDecoding = mvc
+            EnableMvcDecoding = mvc,
+            EnableMultiAudioTracks = multiAudio
         };
 
-        return await GetDynamicSegment(streamingRequest, segmentId)
-            .ConfigureAwait(false);
+        // Multi-audio mode: use separate method to keep standard flow unchanged
+        if (!string.IsNullOrEmpty(fileName))
+        {
+            if (fileName.Contains("..", StringComparison.Ordinal) ||
+                fileName.Contains('/', StringComparison.Ordinal) ||
+                fileName.Contains('\\', StringComparison.Ordinal))
+            {
+                return BadRequest("Invalid filename");
+            }
+
+            return await GetMultiAudioDynamicSegment(streamingRequest, fileName).ConfigureAwait(false);
+        }
+
+        return await GetDynamicSegment(streamingRequest, segmentId ?? 0).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1602,6 +1648,13 @@ public class DynamicHlsController : BaseJellyfinApiController
 
     private string GetCommandLineArguments(string outputPath, StreamState state, bool isEventPlaylist, int startNumber)
     {
+        // Multi-audio: use separate method to keep standard flow unchanged
+        if (state.Request?.EnableMultiAudioTracks == true && state.HlsAudioTracks?.Count > 0)
+        {
+            return GetMultiAudioCommandLineArguments(outputPath, state, isEventPlaylist, startNumber);
+        }
+
+        // Standard flow below - unchanged from upstream
         var videoCodec = _encodingHelper.GetVideoEncoder(state, _encodingOptions);
         var threads = EncodingHelper.GetNumberOfThreads(state, _encodingOptions, videoCodec);
 
@@ -1610,7 +1663,7 @@ public class DynamicHlsController : BaseJellyfinApiController
         var directory = Path.GetDirectoryName(outputPath) ?? throw new ArgumentException($"Provided path ({outputPath}) is not valid.", nameof(outputPath));
         var outputFileNameWithoutExtension = Path.GetFileNameWithoutExtension(outputPath);
         var outputPrefix = Path.Combine(directory, outputFileNameWithoutExtension);
-        var outputExtension = EncodingHelper.GetSegmentFileExtension(state.Request.SegmentContainer);
+        var outputExtension = EncodingHelper.GetSegmentFileExtension(state.Request!.SegmentContainer);
         var outputTsArg = outputPrefix + "%d" + outputExtension;
 
         var segmentFormat = string.Empty;
@@ -1687,13 +1740,19 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <returns>The command line arguments for audio transcoding.</returns>
     private string GetAudioArguments(StreamState state)
     {
+        // Multi-audio: use per-track encoding arguments
+        if (state.Request is not null && state.Request.EnableMultiAudioTracks && state.HlsAudioTracks?.Count > 0)
+        {
+            return _encodingHelper.GetMultiAudioArguments(state);
+        }
+
         if (state.AudioStream is null)
         {
             return string.Empty;
         }
 
         var audioCodec = _encodingHelper.GetAudioEncoder(state);
-        var bitStreamArgs = _encodingHelper.GetAudioBitStreamArguments(state, state.Request.SegmentContainer, state.MediaSource.Container);
+        var bitStreamArgs = _encodingHelper.GetAudioBitStreamArguments(state, state.Request!.SegmentContainer, state.MediaSource!.Container);
 
         // opus, dts, truehd and flac (in FFmpeg 5 and older) are experimental in mp4 muxer
         var strictArgs = string.Empty;
@@ -2113,7 +2172,28 @@ public class DynamicHlsController : BaseJellyfinApiController
         try
         {
             return fileSystem.GetFiles(folder, new[] { segmentExtension }, true, false)
-                .Where(i => Path.GetFileNameWithoutExtension(i.Name).StartsWith(filePrefix, StringComparison.OrdinalIgnoreCase))
+                .Where(i =>
+                {
+                    var name = Path.GetFileNameWithoutExtension(i.Name);
+                    // Must start with playlist hash prefix
+                    if (!name.StartsWith(filePrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+
+                    // Skip multi-audio format files (they have _video_, _audio_, _seg_, _init patterns)
+                    // Standard format is {hash}{number}.ext (e.g., hash0.mp4, hash-1.mp4)
+                    var suffix = name.Substring(filePrefix.Length);
+                    if (suffix.Contains("_video_", StringComparison.Ordinal) ||
+                        suffix.Contains("_audio_", StringComparison.Ordinal) ||
+                        suffix.Contains("_seg_", StringComparison.Ordinal) ||
+                        suffix.Contains("_init", StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+
+                    return true;
+                })
                 .MaxBy(fileSystem.GetLastWriteTimeUtc);
         }
         catch (IOException)
@@ -2158,5 +2238,506 @@ public class DynamicHlsController : BaseJellyfinApiController
         {
             _logger.LogError(ex, "Error deleting partial stream file(s) {Path}", path);
         }
+    }
+
+    /// <summary>
+    /// Parses segment index from multi-audio filename (e.g., video_seg_00009.m4s -> 9).
+    /// </summary>
+    private static int? ParseSegmentIndexFromFileName(string fileName)
+    {
+        // Formats: video_seg_XXXXX.m4s, audio_N_seg_XXXXX.m4s
+        var segIndex = fileName.LastIndexOf("_seg_", StringComparison.Ordinal);
+        if (segIndex < 0)
+        {
+            return null;
+        }
+
+        var startPos = segIndex + 5; // "_seg_".Length
+        var endPos = fileName.LastIndexOf('.');
+        if (endPos < 0 || endPos <= startPos)
+        {
+            return null;
+        }
+
+        var indexSpan = fileName.AsSpan(startPos, endPos - startPos);
+        if (int.TryParse(indexSpan, NumberStyles.Integer, CultureInfo.InvariantCulture, out var index))
+        {
+            return index;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Gets the path to a multi-audio segment.
+    /// </summary>
+    private static string GetMultiAudioSegmentPath(string transcodingDirectory, string fileName, int segmentIndex)
+    {
+        // Get the prefix before _seg_ (e.g., "video" or "audio_1")
+        var segIdx = fileName.LastIndexOf("_seg_", StringComparison.Ordinal);
+        string prefix;
+        if (segIdx >= 0)
+        {
+            prefix = fileName.Substring(0, segIdx);
+        }
+        else if (fileName.EndsWith("_init.mp4", StringComparison.Ordinal))
+        {
+            prefix = fileName.Substring(0, fileName.Length - "_init.mp4".Length);
+        }
+        else
+        {
+            prefix = "video";
+        }
+
+        return Path.Combine(transcodingDirectory, $"{prefix}_seg_{segmentIndex:D5}.m4s");
+    }
+
+    /// <summary>
+    /// Gets the current transcoding index for multi-audio mode.
+    /// Returns null if no segment files exist for this session.
+    /// Note: Unlike standard flow, we check files directly without requiring a running job.
+    /// This allows scrubbing to work correctly when segments exist but job has exited.
+    /// </summary>
+    private static int? GetMultiAudioCurrentSegmentIndex(string transcodingDirectory, string playlistPath)
+    {
+        var playlistId = Path.GetFileNameWithoutExtension(playlistPath);
+        return GetMultiAudioCurrentSegmentIndexFromFiles(transcodingDirectory, playlistId);
+    }
+
+    /// <summary>
+    /// Gets the current segment index from files (most recently modified).
+    /// </summary>
+    /// <param name="transcodingDirectory">The transcoding directory.</param>
+    /// <param name="playlistId">The playlist ID (hash) to filter files for this session.</param>
+    private static int? GetMultiAudioCurrentSegmentIndexFromFiles(string transcodingDirectory, string playlistId)
+    {
+        try
+        {
+            if (!Directory.Exists(transcodingDirectory))
+            {
+                return null;
+            }
+
+            // Look for {playlistId}_video_seg_XXXXX.m4s files (session-specific)
+            var videoSegments = Directory.GetFiles(transcodingDirectory, $"{playlistId}_video_seg_*.m4s");
+            if (videoSegments.Length == 0)
+            {
+                return null;
+            }
+
+            // Find the most recently modified segment (this is the one currently being written)
+            string? mostRecentFile = null;
+            DateTime mostRecentTime = DateTime.MinValue;
+            foreach (var file in videoSegments)
+            {
+                var lastWrite = System.IO.File.GetLastWriteTimeUtc(file);
+                if (lastWrite > mostRecentTime)
+                {
+                    mostRecentTime = lastWrite;
+                    mostRecentFile = file;
+                }
+            }
+
+            if (mostRecentFile is null)
+            {
+                return null;
+            }
+
+            var fileName = Path.GetFileNameWithoutExtension(mostRecentFile);
+            // Format: {playlistId}_video_seg_00000
+            // Find the last underscore before the segment number
+            var segPrefix = "_video_seg_";
+            var segIndex = fileName.IndexOf(segPrefix, StringComparison.Ordinal);
+            if (segIndex >= 0 && int.TryParse(fileName.AsSpan(segIndex + segPrefix.Length), out var index))
+            {
+                return index;
+            }
+
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Deletes the last segment files for multi-audio mode (video and all audio streams).
+    /// </summary>
+    /// <param name="transcodingDirectory">The transcoding directory.</param>
+    /// <param name="playlistId">The playlist ID (hash) to filter files for this session.</param>
+    private async Task DeleteMultiAudioLastFiles(string transcodingDirectory, string playlistId)
+    {
+        try
+        {
+            if (!Directory.Exists(transcodingDirectory))
+            {
+                return;
+            }
+
+            // Find the highest segment index for this session
+            var maxIndex = GetMultiAudioCurrentSegmentIndexFromFiles(transcodingDirectory, playlistId);
+            if (!maxIndex.HasValue)
+            {
+                return;
+            }
+
+            var segmentSuffix = $"_seg_{maxIndex.Value:D5}.m4s";
+
+            // Delete video and all audio segments with this index for this session only
+            var files = Directory.GetFiles(transcodingDirectory, $"{playlistId}_*{segmentSuffix}");
+            foreach (var file in files)
+            {
+                await DeleteFile(file, 0).ConfigureAwait(false);
+            }
+        }
+        catch (IOException ex)
+        {
+            _logger.LogError(ex, "Error deleting multi-audio partial stream files");
+        }
+    }
+
+    /// <summary>
+    /// Gets a variant playlist for multi-audio mode.
+    /// This is a separate method to keep the standard flow in GetVariantPlaylistInternal unchanged.
+    /// </summary>
+    private async Task<ActionResult> GetMultiAudioVariantPlaylist(StreamingRequestDto streamingRequest, CancellationTokenSource cancellationTokenSource, string streamName)
+    {
+        using var state = await StreamingHelpers.GetStreamingState(
+                streamingRequest,
+                HttpContext,
+                _mediaSourceManager,
+                _userManager,
+                _libraryManager,
+                _serverConfigurationManager,
+                _mediaEncoder,
+                _encodingHelper,
+                _transcodeManager,
+                TranscodingJobType,
+                cancellationTokenSource.Token)
+            .ConfigureAwait(false);
+
+        var mediaSourceId = state.BaseRequest.MediaSourceId;
+        double fps = state.TargetFramerate ?? 0.0f;
+        int segmentLength = state.SegmentLength * 1000;
+
+        if (Math.Abs(fps - Math.Floor(fps + 0.001f)) > 0.001)
+        {
+            double nearestIntFramerate = Math.Ceiling(fps);
+            segmentLength = (int)Math.Ceiling(segmentLength * (nearestIntFramerate / fps));
+        }
+
+        var playlistId = Path.GetFileNameWithoutExtension(state.OutputFilePath);
+
+        var request = new CreateMainPlaylistRequest(
+            mediaSourceId is null ? null : Guid.Parse(mediaSourceId),
+            state.MediaPath,
+            segmentLength,
+            state.RunTimeTicks ?? 0,
+            state.Request.SegmentContainer ?? string.Empty,
+            "hls1/multi/",
+            Request.QueryString.ToString(),
+            EncodingHelper.IsCopyCodec(state.OutputVideoCodec),
+            (state.Request as StreamingRequestDto)?.EnableAppleMediaProfile ?? false,
+            true, // enableMultiAudio
+            playlistId,
+            streamName);
+
+        var playlist = _dynamicHlsPlaylistGenerator.CreateMainPlaylist(request);
+        return new FileContentResult(Encoding.UTF8.GetBytes(playlist), MimeTypes.GetMimeType("playlist.m3u8"));
+    }
+
+    /// <summary>
+    /// Gets a dynamic HLS segment for multi-audio mode.
+    /// This is a separate method to keep the standard flow in GetDynamicSegment unchanged.
+    /// </summary>
+    private async Task<ActionResult> GetMultiAudioDynamicSegment(StreamingRequestDto streamingRequest, string fileName)
+    {
+        if ((streamingRequest.StartTimeTicks ?? 0) > 0)
+        {
+            throw new ArgumentException("StartTimeTicks is not allowed.");
+        }
+
+        var cancellationTokenSource = new CancellationTokenSource();
+        var cancellationToken = cancellationTokenSource.Token;
+
+        var state = await StreamingHelpers.GetStreamingState(
+                streamingRequest,
+                HttpContext,
+                _mediaSourceManager,
+                _userManager,
+                _libraryManager,
+                _serverConfigurationManager,
+                _mediaEncoder,
+                _encodingHelper,
+                _transcodeManager,
+                TranscodingJobType,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        var playlistPath = Path.ChangeExtension(state.OutputFilePath, ".m3u8");
+        var transcodingDirectory = Path.GetDirectoryName(playlistPath)!;
+
+        // Parse segment info from filename
+        var segmentPath = Path.Combine(transcodingDirectory, fileName);
+        var isAudioSegment = fileName.Contains("_audio_", StringComparison.Ordinal);
+        var isInitFile = fileName.EndsWith("_init.mp4", StringComparison.Ordinal);
+        var segmentId = ParseSegmentIndexFromFileName(fileName) ?? (isInitFile ? -1 : 0);
+
+        TranscodingJob? job;
+
+        // Fast path: file already exists
+        if (System.IO.File.Exists(segmentPath))
+        {
+            job = _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType);
+            _logger.LogDebug("Multi-audio: returning {SegmentPath} [exists]", segmentPath);
+            return await GetMultiAudioSegmentResult(state, playlistPath, segmentPath, segmentId, job, fileName, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Audio segments: wait for job to start (video request starts transcoding)
+        if (isAudioSegment)
+        {
+            const int maxWaitAttempts = 300; // 30 seconds
+            for (int i = 0; i < maxWaitAttempts && !cancellationToken.IsCancellationRequested; i++)
+            {
+                job = _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType);
+                if (job is not null && !job.HasExited)
+                {
+                    break;
+                }
+
+                if (System.IO.File.Exists(segmentPath))
+                {
+                    _logger.LogDebug("Multi-audio: audio segment {FileName} appeared while waiting", fileName);
+                    return await GetMultiAudioSegmentResult(state, playlistPath, segmentPath, segmentId, job, fileName, cancellationToken).ConfigureAwait(false);
+                }
+
+                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+            }
+
+            job = _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType);
+            return await GetMultiAudioSegmentResult(state, playlistPath, segmentPath, segmentId, job, fileName, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Video segments: may need to start transcoding
+        using (await _transcodeManager.LockAsync(playlistPath, cancellationToken).ConfigureAwait(false))
+        {
+            if (System.IO.File.Exists(segmentPath))
+            {
+                job = _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType);
+                return await GetMultiAudioSegmentResult(state, playlistPath, segmentPath, segmentId, job, fileName, cancellationToken).ConfigureAwait(false);
+            }
+
+            var currentTranscodingIndex = GetMultiAudioCurrentSegmentIndex(transcodingDirectory, playlistPath);
+            var segmentGapRequiringTranscodingChange = 24 / state.SegmentLength;
+            var startTranscoding = false;
+            var effectiveSegmentId = segmentId;
+
+            if (segmentId == -1)
+            {
+                _logger.LogDebug("Multi-audio: starting transcoding for init file");
+                startTranscoding = true;
+                effectiveSegmentId = 0;
+            }
+            else if (currentTranscodingIndex is null)
+            {
+                _logger.LogDebug("Multi-audio: starting transcoding (no current index)");
+                startTranscoding = true;
+            }
+            else if (segmentId < currentTranscodingIndex.Value)
+            {
+                _logger.LogDebug("Multi-audio: restarting transcoding for seek back");
+                startTranscoding = true;
+            }
+            else if (segmentId - currentTranscodingIndex.Value > segmentGapRequiringTranscodingChange)
+            {
+                _logger.LogDebug("Multi-audio: restarting transcoding for large gap");
+                startTranscoding = true;
+            }
+
+            if (startTranscoding)
+            {
+                try
+                {
+                    if (!string.IsNullOrEmpty(streamingRequest.DeviceId))
+                    {
+                        await _transcodeManager.KillTranscodingJobs(streamingRequest.DeviceId, streamingRequest.PlaySessionId, p => false)
+                            .ConfigureAwait(false);
+                    }
+
+                    if (currentTranscodingIndex.HasValue)
+                    {
+                        var playlistId = Path.GetFileNameWithoutExtension(playlistPath);
+                        await DeleteMultiAudioLastFiles(transcodingDirectory, playlistId).ConfigureAwait(false);
+                    }
+
+                    streamingRequest.StartTimeTicks = streamingRequest.CurrentRuntimeTicks;
+                    state.WaitForPath = segmentPath;
+                    job = await _transcodeManager.StartFfMpeg(
+                        state,
+                        playlistPath,
+                        GetCommandLineArguments(playlistPath, state, false, effectiveSegmentId),
+                        Request.HttpContext.User.GetUserId(),
+                        TranscodingJobType,
+                        cancellationTokenSource).ConfigureAwait(false);
+                }
+                catch
+                {
+                    state.Dispose();
+                    throw;
+                }
+            }
+            else
+            {
+                job = _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType);
+                if (job?.TranscodingThrottler is not null)
+                {
+                    await job.TranscodingThrottler.UnpauseTranscoding().ConfigureAwait(false);
+                }
+            }
+        }
+
+        job ??= _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType);
+        return await GetMultiAudioSegmentResult(state, playlistPath, segmentPath, segmentId, job, fileName, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Gets a segment result for multi-audio mode with retry logic for job restarts.
+    /// This is a separate method to keep the standard flow in GetSegmentResult unchanged.
+    /// </summary>
+    private async Task<ActionResult> GetMultiAudioSegmentResult(
+        StreamState state,
+        string playlistPath,
+        string segmentPath,
+        int segmentIndex,
+        TranscodingJob? transcodingJob,
+        string fileName,
+        CancellationToken cancellationToken)
+    {
+        var transcodingDirectory = Path.GetDirectoryName(segmentPath)!;
+        var nextSegmentPath = GetMultiAudioSegmentPath(transcodingDirectory, fileName, segmentIndex + 1);
+
+        const int maxRetries = 300; // 30 seconds
+        for (int i = 0; i < maxRetries && !cancellationToken.IsCancellationRequested; i++)
+        {
+            // Refresh job reference (handles restarts after seeks)
+            var currentJob = transcodingJob?.HasExited == true
+                ? _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType)
+                : transcodingJob;
+
+            if (currentJob is not null && currentJob != transcodingJob && !currentJob.HasExited)
+            {
+                transcodingJob = currentJob;
+            }
+
+            if (System.IO.File.Exists(segmentPath))
+            {
+                if (currentJob is null || currentJob.HasExited || System.IO.File.Exists(nextSegmentPath))
+                {
+                    return GetSegmentResult(state, segmentPath, currentJob);
+                }
+            }
+
+            await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (System.IO.File.Exists(segmentPath))
+        {
+            return GetSegmentResult(state, segmentPath, transcodingJob);
+        }
+
+        _logger.LogWarning("Multi-audio: segment {SegmentPath} not available after retries", segmentPath);
+        return NotFound();
+    }
+
+    /// <summary>
+    /// Gets the complete FFmpeg command line arguments for multi-audio HLS output.
+    /// This is a separate method to keep the standard flow in GetCommandLineArguments unchanged.
+    /// </summary>
+    private string GetMultiAudioCommandLineArguments(string outputPath, StreamState state, bool isEventPlaylist, int startNumber)
+    {
+        var videoCodec = _encodingHelper.GetVideoEncoder(state, _encodingOptions);
+        var threads = EncodingHelper.GetNumberOfThreads(state, _encodingOptions, videoCodec);
+        var mapArgs = state.IsOutputVideo ? _encodingHelper.GetMapArgs(state) : string.Empty;
+
+        var directory = Path.GetDirectoryName(outputPath) ?? throw new ArgumentException($"Provided path ({outputPath}) is not valid.", nameof(outputPath));
+        var outputFileNameWithoutExtension = Path.GetFileNameWithoutExtension(outputPath);
+
+        // Multi-audio requires fMP4 format for var_stream_map
+        const string segmentContainer = "mp4";
+        var inputModifier = _encodingHelper.GetInputModifier(state, _encodingOptions, segmentContainer);
+
+        // Multi-audio: use %v placeholder for stream variants with hash prefix for session isolation
+        var outputTsArg = Path.Combine(directory, outputFileNameWithoutExtension + "_%v_seg_%05d.m4s");
+        var finalOutputPath = Path.Combine(directory, outputFileNameWithoutExtension + "_stream_%v.m3u8");
+
+        // fMP4 init filename with %v placeholder and hash prefix
+        var initFilename = OperatingSystem.IsWindows()
+            ? Path.Combine(directory, outputFileNameWithoutExtension + "_%v_init.mp4")
+            : outputFileNameWithoutExtension + "_%v_init.mp4";
+
+        var useLegacySegmentOption = _mediaEncoder.EncoderVersion < _minFFmpegHlsSegmentOptions;
+
+        var hlsArguments = $"-hls_playlist_type {(isEventPlaylist ? "event" : "vod")} -hls_list_size 0";
+        hlsArguments += $" {(useLegacySegmentOption ? "-hls_ts_options" : "-hls_segment_options")} movflags=+frag_discont";
+        hlsArguments += $" -hls_fmp4_init_filename \"{initFilename}\"";
+        hlsArguments += $" -var_stream_map \"{BuildVarStreamMap(state)}\"";
+        hlsArguments += $" -master_pl_name \"{outputFileNameWithoutExtension}.m3u8\"";
+
+        var maxMuxingQueueSize = _encodingOptions.MaxMuxingQueueSize > 128
+            ? _encodingOptions.MaxMuxingQueueSize.ToString(CultureInfo.InvariantCulture)
+            : "128";
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "{0} {1} -map_metadata -1 -map_chapters -1 -threads {2} {3} {4} {5} -copyts -avoid_negative_ts disabled -max_muxing_queue_size {6} -f hls -max_delay 5000000 -hls_time {7} -hls_segment_type {8} -start_number {9} -hls_segment_filename \"{10}\" {11} -y \"{12}\"",
+            inputModifier,
+            _encodingHelper.GetInputArgument(state, _encodingOptions, segmentContainer),
+            threads,
+            mapArgs,
+            GetVideoArguments(state, startNumber, isEventPlaylist, segmentContainer),
+            GetAudioArguments(state),
+            maxMuxingQueueSize,
+            state.SegmentLength.ToString(CultureInfo.InvariantCulture),
+            "fmp4",
+            startNumber.ToString(CultureInfo.InvariantCulture),
+            EncodingUtils.NormalizePath(outputTsArg),
+            hlsArguments,
+            EncodingUtils.NormalizePath(finalOutputPath)).Trim();
+    }
+
+    /// <summary>
+    /// Builds the FFmpeg var_stream_map option for multi-audio HLS output.
+    /// </summary>
+    /// <param name="state">The stream state with HlsAudioTracks populated.</param>
+    /// <returns>The var_stream_map value for FFmpeg.</returns>
+    private static string BuildVarStreamMap(StreamState state)
+    {
+        if (state.HlsAudioTracks is null || state.HlsAudioTracks.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var parts = new List<string>();
+
+        // Video stream
+        if (state.VideoStream is not null)
+        {
+            parts.Add("v:0,agroup:audio,name:video");
+        }
+
+        // Audio streams
+        foreach (var track in state.HlsAudioTracks)
+        {
+            var lang = !string.IsNullOrEmpty(track.Language) ? track.Language : "und";
+            var name = $"audio_{track.StreamIndex}";
+            var defaultFlag = track.IsDefault ? ",default:yes" : string.Empty;
+
+            parts.Add($"a:{track.OutputIndex},agroup:audio,name:{name},language:{lang}{defaultFlag}");
+        }
+
+        return string.Join(" ", parts);
     }
 }

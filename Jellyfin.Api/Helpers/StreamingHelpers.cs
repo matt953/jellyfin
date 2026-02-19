@@ -266,6 +266,12 @@ public static class StreamingHelpers
 
         state.OutputFilePath = GetOutputFilePath(state, ext, serverConfigurationManager, streamingRequest.DeviceId, streamingRequest.PlaySessionId);
 
+        // Initialize multi-audio track info if enabled
+        if (state.Request?.EnableMultiAudioTracks == true)
+        {
+            state.HlsAudioTracks = encodingHelper.GetHlsAudioTracks(state);
+        }
+
         return state;
     }
 

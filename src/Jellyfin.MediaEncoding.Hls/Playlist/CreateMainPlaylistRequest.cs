@@ -19,7 +19,11 @@ public class CreateMainPlaylistRequest
     /// <param name="queryString">The desired query string to append (must start with ?).</param>
     /// <param name="isRemuxingVideo">Whether the video is being remuxed.</param>
     /// <param name="enableAppleMediaProfile">Whether Apple Projected Media Profile is enabled.</param>
-    public CreateMainPlaylistRequest(Guid? mediaSourceId, string filePath, int desiredSegmentLengthMs, long totalRuntimeTicks, string segmentContainer, string endpointPrefix, string queryString, bool isRemuxingVideo, bool enableAppleMediaProfile = false)
+    /// <param name="enableMultiAudio">Whether multi-audio mode is enabled.</param>
+    /// <param name="playlistId">The playlist ID for multi-audio segment URLs.</param>
+    /// <param name="streamName">The stream name for multi-audio (e.g., "video" or "audio_1").</param>
+    /// <param name="useRelativeSegmentUrls">Whether to use relative segment URLs (no hls-ma prefix). True for audio playlists served from hls-ma/ subdirectory.</param>
+    public CreateMainPlaylistRequest(Guid? mediaSourceId, string filePath, int desiredSegmentLengthMs, long totalRuntimeTicks, string segmentContainer, string endpointPrefix, string queryString, bool isRemuxingVideo, bool enableAppleMediaProfile = false, bool enableMultiAudio = false, string? playlistId = null, string? streamName = null, bool useRelativeSegmentUrls = false)
     {
         MediaSourceId = mediaSourceId;
         FilePath = filePath;
@@ -30,6 +34,10 @@ public class CreateMainPlaylistRequest
         QueryString = queryString;
         IsRemuxingVideo = isRemuxingVideo;
         EnableAppleMediaProfile = enableAppleMediaProfile;
+        EnableMultiAudio = enableMultiAudio;
+        PlaylistId = playlistId;
+        StreamName = streamName;
+        UseRelativeSegmentUrls = useRelativeSegmentUrls;
     }
 
     /// <summary>
@@ -76,4 +84,26 @@ public class CreateMainPlaylistRequest
     /// Gets a value indicating whether Apple Projected Media Profile is enabled.
     /// </summary>
     public bool EnableAppleMediaProfile { get; }
+
+    /// <summary>
+    /// Gets a value indicating whether multi-audio mode is enabled.
+    /// </summary>
+    public bool EnableMultiAudio { get; }
+
+    /// <summary>
+    /// Gets the playlist ID for multi-audio segment URLs.
+    /// </summary>
+    public string? PlaylistId { get; }
+
+    /// <summary>
+    /// Gets the stream name for multi-audio (e.g., "video" or "audio_1").
+    /// </summary>
+    public string? StreamName { get; }
+
+    /// <summary>
+    /// Gets a value indicating whether to use relative segment URLs.
+    /// When true, segment URLs are relative to the playlist location (no hls-ma prefix).
+    /// When false, segment URLs include the hls-ma/{playlistId}/ prefix.
+    /// </summary>
+    public bool UseRelativeSegmentUrls { get; }
 }

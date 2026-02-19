@@ -60,7 +60,10 @@ echo "Logs are being written to: $LOG_FILE"
 echo ""
 
 cd "$JELLYFIN_DIR"
-dotnet run --project Jellyfin.Server -- \
+echo "Building with --no-incremental to ensure all DLLs are in sync..."
+dotnet build --no-incremental -c Debug > /dev/null 2>&1
+echo "Build complete. Starting server..."
+dotnet run --project Jellyfin.Server --no-build -- \
     --webdir "$JELLYFIN_WEB_DIR" \
     --ffmpeg "$FFMPEG_PATH" \
     2>&1 | tee "$LOG_FILE"
