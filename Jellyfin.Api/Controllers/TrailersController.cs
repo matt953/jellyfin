@@ -107,6 +107,8 @@ public class TrailersController : BaseJellyfinApiController
     /// <param name="maxWidth">Optional. Filter by the maximum width of the item.</param>
     /// <param name="maxHeight">Optional. Filter by the maximum height of the item.</param>
     /// <param name="is3D">Optional filter by items that are 3D, or not.</param>
+    /// <param name="isFlat3D">Optional filter by items that are traditional flat 3D (MVC, SBS, TAB), excluding spatial/VR formats.</param>
+    /// <param name="isSpatial">Optional filter by items that are spatial/VR (180°/360° stereo, mono 360°).</param>
     /// <param name="seriesStatus">Optional filter by Series Status. Allows multiple, comma delimited.</param>
     /// <param name="nameStartsWithOrGreater">Optional filter by items whose name is sorted equally or greater than a given input string.</param>
     /// <param name="nameStartsWith">Optional filter by items whose name is sorted equally than a given input string.</param>
@@ -195,6 +197,8 @@ public class TrailersController : BaseJellyfinApiController
         [FromQuery] int? maxWidth,
         [FromQuery] int? maxHeight,
         [FromQuery] bool? is3D,
+        [FromQuery] bool? isFlat3D,
+        [FromQuery] bool? isSpatial,
         [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SeriesStatus[] seriesStatus,
         [FromQuery] string? nameStartsWithOrGreater,
         [FromQuery] string? nameStartsWith,
@@ -286,6 +290,8 @@ public class TrailersController : BaseJellyfinApiController
                 maxWidth,
                 maxHeight,
                 is3D,
+                isFlat3D,
+                isSpatial,
                 seriesStatus,
                 nameStartsWithOrGreater,
                 nameStartsWith,

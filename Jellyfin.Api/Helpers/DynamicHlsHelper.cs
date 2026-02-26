@@ -20,7 +20,9 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Controller.Trickplay;
+using MediaBrowser.MediaEncoding.Subtitles;
 using MediaBrowser.Model.Dlna;
+using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Net;
 using Microsoft.AspNetCore.Http;
@@ -46,6 +48,8 @@ public class DynamicHlsHelper
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly EncodingHelper _encodingHelper;
     private readonly ITrickplayManager _trickplayManager;
+    private readonly PgsOcrConverter? _pgsOcrConverter;
+    private readonly ISubtitleEncoder _subtitleEncoder;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DynamicHlsHelper"/> class.
@@ -61,6 +65,8 @@ public class DynamicHlsHelper
     /// <param name="httpContextAccessor">Instance of the <see cref="IHttpContextAccessor"/> interface.</param>
     /// <param name="encodingHelper">Instance of <see cref="EncodingHelper"/>.</param>
     /// <param name="trickplayManager">Instance of <see cref="ITrickplayManager"/>.</param>
+    /// <param name="subtitleEncoder">Instance of <see cref="ISubtitleEncoder"/>.</param>
+    /// <param name="pgsOcrConverter">Optional instance of <see cref="PgsOcrConverter"/>.</param>
     public DynamicHlsHelper(
         ILibraryManager libraryManager,
         IUserManager userManager,
@@ -72,7 +78,9 @@ public class DynamicHlsHelper
         ILogger<DynamicHlsHelper> logger,
         IHttpContextAccessor httpContextAccessor,
         EncodingHelper encodingHelper,
-        ITrickplayManager trickplayManager)
+        ITrickplayManager trickplayManager,
+        ISubtitleEncoder subtitleEncoder,
+        PgsOcrConverter? pgsOcrConverter = null)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
@@ -85,6 +93,8 @@ public class DynamicHlsHelper
         _httpContextAccessor = httpContextAccessor;
         _encodingHelper = encodingHelper;
         _trickplayManager = trickplayManager;
+        _subtitleEncoder = subtitleEncoder;
+        _pgsOcrConverter = pgsOcrConverter;
     }
 
     /// <summary>
@@ -212,7 +222,8 @@ public class DynamicHlsHelper
 
         var subtitleStreams = state.MediaSource
             .MediaStreams
-            .Where(i => i.IsTextSubtitleStream)
+            .Where(i => i.Type == MediaStreamType.Subtitle &&
+                        (i.IsTextSubtitleStream || IsPgsWithOcrSupport(i, state.MediaSource)))
             .ToList();
 
         var subtitleGroup = subtitleStreams.Count > 0 && (state.SubtitleDeliveryMethod == SubtitleDeliveryMethod.Hls || state.VideoRequest!.EnableSubtitlesInManifest)
@@ -341,10 +352,24 @@ public class DynamicHlsHelper
             AddTrickplay(state, trickplayResolutions, builder, _httpContextAccessor.HttpContext.User);
 
             // Add I-frame playlist if available (Apple HLS-compliant for scrubbing)
+            // Only include if the playlist file actually exists on disk
             var iframeInfo = await _trickplayManager.GetIFramePlaylistInfoAsync(sourceId).ConfigureAwait(false);
             if (iframeInfo is not null)
             {
-                AddIFramePlaylist(state, iframeInfo, builder, _httpContextAccessor.HttpContext.User);
+                var item = _libraryManager.GetItemById(sourceId);
+                if (item is not null)
+                {
+                    var saveWithMedia = _libraryManager.GetLibraryOptions(item).SaveTrickplayWithMedia;
+                    var iframePath = _trickplayManager.GetIFramePlaylistPath(item, saveWithMedia);
+                    if (iframePath is not null)
+                    {
+                        AddIFramePlaylist(state, iframeInfo, builder, _httpContextAccessor.HttpContext.User);
+                    }
+                    else
+                    {
+                        _logger.LogDebug("I-frame playlist info exists in database but file not found on disk for {ItemId}", sourceId);
+                    }
+                }
             }
         }
 
@@ -682,9 +707,26 @@ public class DynamicHlsHelper
         var selectedIndex = state.SubtitleStream is null || state.SubtitleDeliveryMethod != SubtitleDeliveryMethod.Hls ? (int?)null : state.SubtitleStream.Index;
         const string Format = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"{0}\",DEFAULT={1},FORCED={2},AUTOSELECT=YES,URI=\"{3}\",LANGUAGE=\"{4}\"";
 
+        // Track name occurrences to ensure uniqueness
+        // HLS spec requires NAME to be unique within GROUP-ID
+        var nameCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var stream in subtitles)
         {
-            var name = stream.DisplayTitle;
+            var baseName = stream.DisplayTitle ?? $"Subtitle {stream.Index}";
+
+            // Generate unique name by adding counter suffix for duplicates
+            string name;
+            if (nameCount.TryGetValue(baseName, out var count))
+            {
+                nameCount[baseName] = count + 1;
+                name = $"{baseName} #{count + 1}";
+            }
+            else
+            {
+                nameCount[baseName] = 1;
+                name = baseName;
+            }
 
             var isDefault = selectedIndex.HasValue && selectedIndex.Value == stream.Index;
             var isForced = stream.IsForced;
@@ -727,9 +769,8 @@ public class DynamicHlsHelper
 
         const string Format = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{0}\",DEFAULT={1},AUTOSELECT={2},LANGUAGE=\"{3}\",URI=\"{4}\"";
 
-        // Track name+language occurrences to add suffix for duplicates
-        // Same name with different languages is OK (e.g. "Surround 5.1" English vs French)
-        var nameLanguageCount = new Dictionary<(string Name, string Language), int>();
+        // Track used names to ensure uniqueness (HLS spec requires NAME unique within GROUP-ID)
+        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var track in state.HlsAudioTracks)
         {
@@ -740,21 +781,36 @@ public class DynamicHlsHelper
                     : $"Audio {track.OutputIndex + 1}";
 
             var language = track.Language ?? "und";
-            var key = (baseName.ToUpperInvariant(), language.ToUpperInvariant());
 
-            // Add suffix for duplicate name+language combinations
+            // Generate unique name: try base, then with language, then with counter
             string name;
-            if (nameLanguageCount.TryGetValue(key, out var count))
+            if (!usedNames.Contains(baseName))
             {
-                nameLanguageCount[key] = count + 1;
-                name = $"{baseName} ({count + 1})";
+                name = baseName;
             }
             else
             {
-                nameLanguageCount[key] = 1;
-                name = baseName;
+                // Try adding language suffix
+                var langDisplay = !string.IsNullOrEmpty(track.Language) ? track.Language : "und";
+                var nameWithLang = $"{baseName} ({langDisplay})";
+                if (!usedNames.Contains(nameWithLang))
+                {
+                    name = nameWithLang;
+                }
+                else
+                {
+                    // Same name and language - add counter
+                    var counter = 2;
+                    while (usedNames.Contains($"{nameWithLang} #{counter}"))
+                    {
+                        counter++;
+                    }
+
+                    name = $"{nameWithLang} #{counter}";
+                }
             }
 
+            usedNames.Add(name);
             var isDefault = track.IsDefault;
 
             // URL for audio playlist - uses same pattern as main.m3u8
@@ -1084,5 +1140,44 @@ public class DynamicHlsHelper
             oldValue.ToString(),
             newValue.ToString(),
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Checks if a PGS subtitle stream can be converted via OCR.
+    /// Only returns true if the .sup file has been pre-extracted (by subtitle extract plugin).
+    /// </summary>
+    /// <param name="stream">The media stream to check.</param>
+    /// <param name="mediaSource">The media source containing the stream.</param>
+    /// <returns>True if this is a PGS stream with OCR support AND the .sup file exists.</returns>
+    private bool IsPgsWithOcrSupport(MediaStream stream, MediaSourceInfo mediaSource)
+    {
+        if (_pgsOcrConverter is null)
+        {
+            return false;
+        }
+
+        var codec = stream.Codec;
+        if (string.IsNullOrEmpty(codec) || !MediaStream.IsPgsFormat(codec))
+        {
+            return false;
+        }
+
+        if (!_pgsOcrConverter.IsLanguageSupported(stream.Language))
+        {
+            return false;
+        }
+
+        // Only include PGS subtitles if the .sup file has been pre-extracted
+        // This prevents timeouts - extraction should happen during library scan via subtitle extract plugin
+        if (!_subtitleEncoder.IsPgsSubtitleExtracted(mediaSource, stream.Index))
+        {
+            _logger.LogDebug(
+                "PGS subtitle track {Index} for {MediaSourceId} not included in playlist - .sup file not extracted yet",
+                stream.Index,
+                mediaSource.Id);
+            return false;
+        }
+
+        return true;
     }
 }

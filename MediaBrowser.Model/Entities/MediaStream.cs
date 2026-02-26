@@ -836,5 +836,14 @@ namespace MediaBrowser.Model.Entities
 
             return (VideoRange.SDR, VideoRangeType.SDR);
         }
+
+        /// <summary>
+        /// Creates a shallow copy of this MediaStream.
+        /// </summary>
+        /// <returns>A shallow copy of the current MediaStream.</returns>
+        public MediaStream Clone()
+        {
+            return (MediaStream)MemberwiseClone();
+        }
     }
 }

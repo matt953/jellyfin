@@ -80,6 +80,7 @@ using MediaBrowser.Controller.SyncPlay;
 using MediaBrowser.Controller.TV;
 using MediaBrowser.LocalMetadata.Savers;
 using MediaBrowser.MediaEncoding.BdInfo;
+using MediaBrowser.MediaEncoding.Ocr;
 using MediaBrowser.MediaEncoding.Spatial;
 using MediaBrowser.MediaEncoding.Subtitles;
 using MediaBrowser.MediaEncoding.Transcoding;
@@ -573,6 +574,12 @@ namespace Emby.Server.Implementations
 
             serviceCollection.AddSingleton<IAttachmentExtractor, MediaBrowser.MediaEncoding.Attachments.AttachmentExtractor>();
             serviceCollection.AddSingleton<ISpatialInitPatcher, SpatialInitPatcher>();
+
+            // OCR services for PGS subtitle conversion
+            serviceCollection.AddSingleton<OcrModelManager>();
+            serviceCollection.AddSingleton<OcrEngine>();
+            serviceCollection.AddSingleton<MediaBrowser.MediaEncoding.Subtitles.Pgs.PgsParser>();
+            serviceCollection.AddSingleton<MediaBrowser.MediaEncoding.Subtitles.PgsOcrConverter>();
 
             serviceCollection.AddSingleton<ITranscodeManager, TranscodeManager>();
             serviceCollection.AddScoped<MediaInfoHelper>();

@@ -256,7 +256,14 @@ public class SubtitleController : BaseJellyfinApiController
 
                 var text = await reader.ReadToEndAsync().ConfigureAwait(false);
 
-                text = text.Replace("WEBVTT", "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:00:00:00.000", StringComparison.Ordinal);
+                // X-TIMESTAMP-MAP maps VTT LOCAL time to MPEG-TS PTS
+                // With CopyTimestamps=true: VTT cues have absolute timestamps, video starts at PTS 0
+                // With CopyTimestamps=false: VTT cues are relative to segment start, need offset
+                // FFmpeg uses -start_at_zero for HLS which means output PTS starts at 0
+                var mpegtsValue = copyTimestamps
+                    ? 0
+                    : (startPositionTicks * 90 / TimeSpan.TicksPerMillisecond);
+                text = text.Replace("WEBVTT", $"WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:{mpegtsValue},LOCAL:00:00:00.000", StringComparison.Ordinal);
 
                 return File(Encoding.UTF8.GetBytes(text), MimeTypes.GetMimeType("file." + format));
             }

@@ -2115,9 +2115,13 @@ public class DynamicHlsController : BaseJellyfinApiController
             return false;
         }
 
-        // Check if it's an fMP4 init segment (filename ends with -1 before extension)
+        // Check if it's an fMP4 init segment
+        // Standard mode: {hash}-1.mp4
+        // Multi-audio mode: {hash}_video_init.mp4
         var filename = Path.GetFileNameWithoutExtension(segmentPath);
-        if (!filename.EndsWith("-1", StringComparison.Ordinal))
+        var isInitSegment = filename.EndsWith("-1", StringComparison.Ordinal)
+            || filename.EndsWith("_video_init", StringComparison.Ordinal);
+        if (!isInitSegment)
         {
             return false;
         }
@@ -2528,6 +2532,9 @@ public class DynamicHlsController : BaseJellyfinApiController
                 return await GetMultiAudioSegmentResult(state, playlistPath, segmentPath, segmentId, job, fileName, cancellationToken).ConfigureAwait(false);
             }
 
+            // Check for running job BEFORE checking file-based index
+            // This prevents killing a job that just started but hasn't produced files yet
+            var existingJob = _transcodeManager.GetTranscodingJob(playlistPath, TranscodingJobType);
             var currentTranscodingIndex = GetMultiAudioCurrentSegmentIndex(transcodingDirectory, playlistPath);
             var segmentGapRequiringTranscodingChange = 24 / state.SegmentLength;
             var startTranscoding = false;
@@ -2541,8 +2548,18 @@ public class DynamicHlsController : BaseJellyfinApiController
             }
             else if (currentTranscodingIndex is null)
             {
-                _logger.LogDebug("Multi-audio: starting transcoding (no current index)");
-                startTranscoding = true;
+                // No files exist yet - but check if a job is already running
+                if (existingJob is not null && !existingJob.HasExited)
+                {
+                    // Job is running but hasn't produced files yet - wait for it instead of killing
+                    _logger.LogDebug("Multi-audio: job is running but no files yet, waiting for segment {SegmentId}", segmentId);
+                    startTranscoding = false;
+                }
+                else
+                {
+                    _logger.LogDebug("Multi-audio: starting transcoding (no current index)");
+                    startTranscoding = true;
+                }
             }
             else if (segmentId < currentTranscodingIndex.Value)
             {

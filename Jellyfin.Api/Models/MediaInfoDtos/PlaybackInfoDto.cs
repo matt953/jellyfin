@@ -87,4 +87,16 @@ public class PlaybackInfoDto
     /// Gets or sets a value indicating whether always burn in subtitles when transcoding.
     /// </summary>
     public bool? AlwaysBurnInSubtitleWhenTranscoding { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether to enable Apple Projected Media Profile for spatial video.
+    /// When true, forces HLS transcoding to HEVC with VEXU metadata for Vision Pro playback.
+    /// </summary>
+    public bool? EnableAppleMediaProfile { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether to enable MVC decoding for stereoscopic 3D Blu-ray content.
+    /// When true, forces transcoding using edge264 decoder with side-by-side output.
+    /// </summary>
+    public bool? EnableMvcDecoding { get; set; }
 }

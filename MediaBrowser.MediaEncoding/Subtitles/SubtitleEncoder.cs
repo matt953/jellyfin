@@ -40,6 +40,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         private readonly ISubtitleParser _subtitleParser;
         private readonly IPathManager _pathManager;
         private readonly IServerConfigurationManager _serverConfigurationManager;
+        private readonly PgsOcrConverter? _pgsOcrConverter;
 
         /// <summary>
         /// The _semaphoreLocks.
@@ -58,7 +59,8 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             IMediaSourceManager mediaSourceManager,
             ISubtitleParser subtitleParser,
             IPathManager pathManager,
-            IServerConfigurationManager serverConfigurationManager)
+            IServerConfigurationManager serverConfigurationManager,
+            PgsOcrConverter? pgsOcrConverter = null)
         {
             _logger = logger;
             _fileSystem = fileSystem;
@@ -68,6 +70,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             _subtitleParser = subtitleParser;
             _pathManager = pathManager;
             _serverConfigurationManager = serverConfigurationManager;
+            _pgsOcrConverter = pgsOcrConverter;
         }
 
         private MemoryStream ConvertSubtitles(
@@ -142,6 +145,21 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             var subtitleStream = mediaSource.MediaStreams
                .First(i => i.Type == MediaStreamType.Subtitle && i.Index == subtitleStreamIndex);
 
+            // Check for PGS OCR path
+            var pgsOcrResult = await TryGetPgsOcrSubtitlesAsync(
+                mediaSource,
+                subtitleStream,
+                outputFormat,
+                startTimeTicks,
+                endTimeTicks,
+                preserveOriginalTimestamps,
+                cancellationToken).ConfigureAwait(false);
+
+            if (pgsOcrResult is not null)
+            {
+                return pgsOcrResult;
+            }
+
             var (stream, inputFormat) = await GetSubtitleStream(mediaSource, subtitleStream, cancellationToken)
                         .ConfigureAwait(false);
 
@@ -196,6 +214,114 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             }
 
             return AsyncFile.OpenRead(fileInfo.Path);
+        }
+
+        /// <summary>
+        /// Attempts to convert PGS subtitles to text using OCR.
+        /// </summary>
+        /// <returns>Stream with converted subtitles, or null if OCR is not available.</returns>
+        private async Task<Stream?> TryGetPgsOcrSubtitlesAsync(
+            MediaSourceInfo mediaSource,
+            MediaStream subtitleStream,
+            string outputFormat,
+            long startTimeTicks,
+            long endTimeTicks,
+            bool preserveOriginalTimestamps,
+            CancellationToken cancellationToken)
+        {
+            // Check if OCR converter is available
+            if (_pgsOcrConverter is null)
+            {
+                return null;
+            }
+
+            // Check if this is a PGS subtitle
+            var codec = subtitleStream.Codec;
+            if (string.IsNullOrEmpty(codec) || !MediaStream.IsPgsFormat(codec))
+            {
+                return null;
+            }
+
+            // Check if OCR models are available for this language
+            if (!_pgsOcrConverter.IsLanguageSupported(subtitleStream.Language))
+            {
+                _logger.LogDebug(
+                    "OCR models not available for PGS subtitle language {Language}, falling back to raw stream",
+                    subtitleStream.Language);
+                return null;
+            }
+
+            _logger.LogDebug(
+                "Using OCR to convert PGS subtitle track {Index} ({Language}) to {Format}",
+                subtitleStream.Index,
+                subtitleStream.Language,
+                outputFormat);
+
+            try
+            {
+                // Convert the requested time range using OCR
+                var startTime = TimeSpan.FromTicks(startTimeTicks);
+                var endTime = endTimeTicks > 0 ? TimeSpan.FromTicks(endTimeTicks) : TimeSpan.MaxValue;
+
+                Stream pgsStream;
+
+                if (subtitleStream.IsExternal)
+                {
+                    // External .sup file - read directly
+                    if (!File.Exists(subtitleStream.Path))
+                    {
+                        _logger.LogWarning("External PGS subtitle file not found at {Path}", subtitleStream.Path);
+                        return null;
+                    }
+
+                    _logger.LogDebug("PGS OCR: Using external .sup file for track {Index}", subtitleStream.Index);
+                    pgsStream = AsyncFile.OpenRead(subtitleStream.Path);
+                }
+                else
+                {
+                    // Require pre-extracted .sup file (extracted during library scan by subtitle extract plugin)
+                    var cachedSupPath = GetSubtitleCachePath(mediaSource, subtitleStream.Index, ".sup");
+
+                    if (!File.Exists(cachedSupPath))
+                    {
+                        _logger.LogWarning("PGS OCR: .sup file not found for track {Index}. Install subtitle extract plugin and run library scan.", subtitleStream.Index);
+                        return null;
+                    }
+
+                    _logger.LogDebug("PGS OCR: Using cached .sup file for track {Index}", subtitleStream.Index);
+                    pgsStream = AsyncFile.OpenRead(cachedSupPath);
+                }
+
+                try
+                {
+                    var trackInfo = await _pgsOcrConverter.ConvertTimeRangeAsync(
+                        pgsStream,
+                        subtitleStream.Language,
+                        startTime,
+                        endTime,
+                        cancellationToken).ConfigureAwait(false);
+
+                    // Filter and adjust timestamps
+                    FilterEvents(trackInfo, startTimeTicks, endTimeTicks, preserveOriginalTimestamps);
+
+                    // Write to output format
+                    var writer = GetWriter(outputFormat);
+                    var ms = new MemoryStream();
+                    writer.Write(trackInfo, ms, cancellationToken);
+                    ms.Position = 0;
+
+                    return ms;
+                }
+                finally
+                {
+                    await pgsStream.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to convert PGS subtitle using OCR, falling back to raw stream");
+                return null;
+            }
         }
 
         internal async Task<SubtitleInfo> GetReadableFile(
@@ -928,6 +1054,13 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         private string GetSubtitleCachePath(MediaSourceInfo mediaSource, int subtitleStreamIndex, string outputSubtitleExtension)
         {
             return _pathManager.GetSubtitlePath(mediaSource.Id, subtitleStreamIndex, outputSubtitleExtension);
+        }
+
+        /// <inheritdoc />
+        public bool IsPgsSubtitleExtracted(MediaSourceInfo mediaSource, int subtitleStreamIndex)
+        {
+            var supPath = GetSubtitleCachePath(mediaSource, subtitleStreamIndex, ".sup");
+            return File.Exists(supPath);
         }
 
         /// <inheritdoc />

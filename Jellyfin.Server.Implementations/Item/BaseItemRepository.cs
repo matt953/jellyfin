@@ -153,6 +153,7 @@ public sealed class BaseItemRepository
         context.PeopleBaseItemMap.WhereOneOrMany(relatedItems, e => e.ItemId).ExecuteDelete();
         context.Peoples.WhereOneOrMany(query, e => e.Id).Where(e => e.BaseItems!.Count == 0).ExecuteDelete();
         context.TrickplayInfos.WhereOneOrMany(relatedItems, e => e.ItemId).ExecuteDelete();
+        context.IFramePlaylistInfos.WhereOneOrMany(relatedItems, e => e.ItemId).ExecuteDelete();
         context.SaveChanges();
         transaction.Commit();
     }
@@ -2596,6 +2597,56 @@ public sealed class BaseItemRepository
             {
                 baseQuery = baseQuery
                     .Where(e => !e.Data!.Contains("Video3DFormat"));
+            }
+        }
+
+        // Spatial/VR Video3DFormat values: Stereo180Sbs(5), Stereo180Ou(6), Stereo360Sbs(7), Stereo360Ou(8), Mono360(9)
+        // Check both string and integer serialization formats since older data may use integers
+        if (filter.IsFlat3D.HasValue)
+        {
+            if (filter.IsFlat3D.Value)
+            {
+                // Traditional 3D formats only (MVC, Side-by-Side, Top-and-Bottom) — exclude spatial
+                baseQuery = baseQuery
+                    .Where(e => e.Data!.Contains("Video3DFormat")
+                        && !e.Data!.Contains("Stereo180Sbs") && !e.Data!.Contains("\"Video3DFormat\":5")
+                        && !e.Data!.Contains("Stereo180Ou") && !e.Data!.Contains("\"Video3DFormat\":6")
+                        && !e.Data!.Contains("Stereo360Sbs") && !e.Data!.Contains("\"Video3DFormat\":7")
+                        && !e.Data!.Contains("Stereo360Ou") && !e.Data!.Contains("\"Video3DFormat\":8")
+                        && !e.Data!.Contains("Mono360") && !e.Data!.Contains("\"Video3DFormat\":9"));
+            }
+            else
+            {
+                baseQuery = baseQuery
+                    .Where(e => !e.Data!.Contains("Video3DFormat")
+                        || e.Data!.Contains("Stereo180Sbs") || e.Data!.Contains("\"Video3DFormat\":5")
+                        || e.Data!.Contains("Stereo180Ou") || e.Data!.Contains("\"Video3DFormat\":6")
+                        || e.Data!.Contains("Stereo360Sbs") || e.Data!.Contains("\"Video3DFormat\":7")
+                        || e.Data!.Contains("Stereo360Ou") || e.Data!.Contains("\"Video3DFormat\":8")
+                        || e.Data!.Contains("Mono360") || e.Data!.Contains("\"Video3DFormat\":9"));
+            }
+        }
+
+        if (filter.IsSpatial.HasValue)
+        {
+            if (filter.IsSpatial.Value)
+            {
+                // Spatial/VR formats (180°/360° stereo, mono 360°)
+                baseQuery = baseQuery
+                    .Where(e => e.Data!.Contains("Stereo180Sbs") || e.Data!.Contains("\"Video3DFormat\":5")
+                        || e.Data!.Contains("Stereo180Ou") || e.Data!.Contains("\"Video3DFormat\":6")
+                        || e.Data!.Contains("Stereo360Sbs") || e.Data!.Contains("\"Video3DFormat\":7")
+                        || e.Data!.Contains("Stereo360Ou") || e.Data!.Contains("\"Video3DFormat\":8")
+                        || e.Data!.Contains("Mono360") || e.Data!.Contains("\"Video3DFormat\":9"));
+            }
+            else
+            {
+                baseQuery = baseQuery
+                    .Where(e => !e.Data!.Contains("Stereo180Sbs") && !e.Data!.Contains("\"Video3DFormat\":5")
+                        && !e.Data!.Contains("Stereo180Ou") && !e.Data!.Contains("\"Video3DFormat\":6")
+                        && !e.Data!.Contains("Stereo360Sbs") && !e.Data!.Contains("\"Video3DFormat\":7")
+                        && !e.Data!.Contains("Stereo360Ou") && !e.Data!.Contains("\"Video3DFormat\":8")
+                        && !e.Data!.Contains("Mono360") && !e.Data!.Contains("\"Video3DFormat\":9"));
             }
         }
 

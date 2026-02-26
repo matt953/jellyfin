@@ -26,6 +26,7 @@
     <PackageReference Include="BDInfo" />
     <PackageReference Include="libse" />
     <PackageReference Include="Microsoft.Extensions.Http" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" />
     <PackageReference Include="UTF.Unknown" />
   </ItemGroup>
 

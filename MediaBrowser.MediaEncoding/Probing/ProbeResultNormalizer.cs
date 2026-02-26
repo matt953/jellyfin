@@ -120,6 +120,26 @@ namespace MediaBrowser.MediaEncoding.Probing
                 .Where(i => i is not null)
                 .ToList();
 
+            // Check for stereo_mode tag on video streams (MKV MVC 3D Blu-ray content)
+            foreach (var stream in internalStreams.Where(s => s.CodecType == CodecType.Video))
+            {
+                if (stream.Tags is not null
+                    && stream.Tags.TryGetValue("stereo_mode", out var stereoMode))
+                {
+                    if (string.Equals(stereoMode, "left_right", StringComparison.OrdinalIgnoreCase))
+                    {
+                        info.Video3DFormat = Video3DFormat.FullSideBySide;
+                        break;
+                    }
+                    else if (string.Equals(stereoMode, "block_rl", StringComparison.OrdinalIgnoreCase)
+                          || string.Equals(stereoMode, "block_lr", StringComparison.OrdinalIgnoreCase))
+                    {
+                        info.Video3DFormat = Video3DFormat.MVC;
+                        break;
+                    }
+                }
+            }
+
             if (data.Format is not null)
             {
                 info.Container = NormalizeFormat(data.Format.FormatName, info.MediaStreams);
@@ -244,11 +264,6 @@ namespace MediaBrowser.MediaEncoding.Probing
                 }
 
                 ExtractTimestamp(info);
-
-                if (tags.TryGetValue("stereo_mode", out var stereoMode) && string.Equals(stereoMode, "left_right", StringComparison.OrdinalIgnoreCase))
-                {
-                    info.Video3DFormat = Video3DFormat.FullSideBySide;
-                }
 
                 foreach (var mediaStream in info.MediaStreams)
                 {

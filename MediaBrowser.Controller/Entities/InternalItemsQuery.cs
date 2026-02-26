@@ -141,6 +141,10 @@ namespace MediaBrowser.Controller.Entities
 
         public bool? Is3D { get; set; }
 
+        public bool? IsFlat3D { get; set; }
+
+        public bool? IsSpatial { get; set; }
+
         public bool? IsHD { get; set; }
 
         public bool? IsLocked { get; set; }

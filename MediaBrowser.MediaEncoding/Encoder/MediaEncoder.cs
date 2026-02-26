@@ -900,8 +900,9 @@ namespace MediaBrowser.MediaEncoding.Encoder
 
             // Use Width (not MaxWidth) for 3D/spatial formats to ensure crop filters are applied
             // For non-3D content, continue using MaxWidth for flexible aspect-ratio-preserving scaling
+            // EnableSpatialConversion = true enables crop/v360 filters for spatial formats (needed for flat thumbnail output)
             var baseRequest = mediaSource.Video3DFormat.HasValue
-                ? new BaseEncodingJobOptions { Width = maxWidth, MaxFramerate = (float)(1.0 / interval.TotalSeconds) }
+                ? new BaseEncodingJobOptions { Width = maxWidth, MaxFramerate = (float)(1.0 / interval.TotalSeconds), EnableSpatialConversion = true }
                 : new BaseEncodingJobOptions { MaxWidth = maxWidth, MaxFramerate = (float)(1.0 / interval.TotalSeconds) };
             var jobState = new EncodingJobInfo(TranscodingJobType.Progressive)
             {
@@ -1176,6 +1177,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
 
             // Create job state for H.264 output (not MJPEG like trickplay)
             // For 3D/spatial formats, use Width to ensure crop filters are applied
+            // EnableSpatialConversion = true enables crop/v360 filters for spatial formats (needed for flat I-frame output)
             BaseEncodingJobOptions baseRequest;
             if (mediaSource.Video3DFormat.HasValue)
             {
@@ -1188,7 +1190,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
                     ? (int)Math.Ceiling((double)targetHeight * effectiveWidth / effectiveHeight)
                     : 0;
                 targetWidth = 2 * (targetWidth / 2); // Ensure even
-                baseRequest = new BaseEncodingJobOptions { Width = targetWidth, Height = targetHeight, MaxFramerate = 1.0f };
+                baseRequest = new BaseEncodingJobOptions { Width = targetWidth, Height = targetHeight, MaxFramerate = 1.0f, EnableSpatialConversion = true };
             }
             else
             {

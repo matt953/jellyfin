@@ -61,5 +61,13 @@ namespace MediaBrowser.Controller.MediaEncoding
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>Task.</returns>
         Task ExtractAllExtractableSubtitles(MediaSourceInfo mediaSource, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Checks if a PGS subtitle has been extracted and cached as a .sup file.
+        /// </summary>
+        /// <param name="mediaSource">The media source.</param>
+        /// <param name="subtitleStreamIndex">The subtitle stream index.</param>
+        /// <returns>True if the .sup file exists, false otherwise.</returns>
+        bool IsPgsSubtitleExtracted(MediaSourceInfo mediaSource, int subtitleStreamIndex);
     }
 }

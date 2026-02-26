@@ -119,6 +119,22 @@ public class TrickplayManager : ITrickplayManager
                 }
             }
         }
+
+        // Also move iframe data if it exists
+        var shouldBeSavedWithMediaFinal = libraryOptions is not null && libraryOptions.SaveTrickplayWithMedia;
+        var localIframeDir = new DirectoryInfo(GetIFrameDirectoryInternal(video, false));
+        var mediaIframeDir = new DirectoryInfo(GetIFrameDirectoryInternal(video, true));
+
+        if (shouldBeSavedWithMediaFinal && localIframeDir.Exists && localIframeDir.EnumerateFiles().Any())
+        {
+            MoveContent(localIframeDir.FullName, mediaIframeDir.FullName);
+            _logger.LogInformation("Moved I-frame playlist for {ItemName} to {Location}", video.Name, mediaIframeDir);
+        }
+        else if (!shouldBeSavedWithMediaFinal && mediaIframeDir.Exists && mediaIframeDir.EnumerateFiles().Any())
+        {
+            MoveContent(mediaIframeDir.FullName, localIframeDir.FullName);
+            _logger.LogInformation("Moved I-frame playlist for {ItemName} to {Location}", video.Name, localIframeDir);
+        }
     }
 
     private void MoveContent(string sourceFolder, string destinationFolder)
@@ -169,6 +185,12 @@ public class TrickplayManager : ITrickplayManager
                         .ExecuteDeleteAsync(cancellationToken)
                         .ConfigureAwait(false);
 
+                // Also delete I-frame playlist info since the directory was deleted
+                await dbContext.IFramePlaylistInfos
+                        .Where(i => i.ItemId.Equals(video.Id))
+                        .ExecuteDeleteAsync(cancellationToken)
+                        .ConfigureAwait(false);
+
                 if (!replace)
                 {
                     return;
@@ -205,6 +227,14 @@ public class TrickplayManager : ITrickplayManager
                         .ToListAsync(cancellationToken)
                         .ConfigureAwait(false);
                 var expectedFolders = trickplayInfos.Select(i => GetTrickplayDirectory(video, i.TileWidth, i.TileHeight, i.Width, saveWithMedia)).ToList();
+
+                // Include iframe directory in expected folders so it doesn't get pruned
+                var iframeDir = GetIFrameDirectoryInternal(video, saveWithMedia);
+                if (Directory.Exists(iframeDir))
+                {
+                    expectedFolders.Add(iframeDir);
+                }
+
                 var foldersToRemove = existingFolders.Except(expectedFolders);
                 foreach (var folder in foldersToRemove)
                 {

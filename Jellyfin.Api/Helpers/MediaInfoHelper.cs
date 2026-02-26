@@ -167,6 +167,8 @@ public class MediaInfoHelper
     /// <param name="allowAudioStreamCopy">Allow audio stream copy.</param>
     /// <param name="alwaysBurnInSubtitleWhenTranscoding">Always burn-in subtitle when transcoding.</param>
     /// <param name="ipAddress">Requesting IP address.</param>
+    /// <param name="enableAppleMediaProfile">Enable Apple Projected Media Profile for spatial video.</param>
+    /// <param name="enableMvcDecoding">Enable MVC decoding for stereoscopic 3D Blu-ray content.</param>
     public void SetDeviceSpecificData(
         BaseItem item,
         MediaSourceInfo mediaSource,
@@ -186,7 +188,9 @@ public class MediaInfoHelper
         bool allowVideoStreamCopy,
         bool allowAudioStreamCopy,
         bool alwaysBurnInSubtitleWhenTranscoding,
-        IPAddress ipAddress)
+        IPAddress ipAddress,
+        bool enableAppleMediaProfile = false,
+        bool enableMvcDecoding = false)
     {
         var streamBuilder = new StreamBuilder(_mediaEncoder, _logger);
 
@@ -225,6 +229,29 @@ public class MediaInfoHelper
         if (!enableTranscoding)
         {
             mediaSource.SupportsTranscoding = false;
+        }
+
+        // Disable direct play for spatial content when Apple Projected Media Profile is enabled
+        // Direct play bypasses HLS entirely, preventing APMP HLS tags (REQ-VIDEO-LAYOUT, etc.)
+        // Direct stream (HLS remux) is OK because we can still add APMP HLS tags
+        if (enableAppleMediaProfile
+            && mediaSource.Video3DFormat is not null
+            && EncodingHelper.IsSpatialFormatRequiringVexu(mediaSource.Video3DFormat.Value))
+        {
+            _logger.LogInformation("APMP enabled for spatial format {Format}, disabling DirectPlay", mediaSource.Video3DFormat);
+            mediaSource.SupportsDirectPlay = false;
+        }
+
+        // Disable direct play AND direct stream for MVC content when MVC decoding is enabled
+        // MVC decoding with edge264 outputs side-by-side format which must be transcoded
+        // The source MVC format cannot be directly streamed - it requires the edge264 decoder
+        // Ensure SupportsTranscoding is true so TranscodingUrl is generated
+        if (enableMvcDecoding && mediaSource.Video3DFormat == Video3DFormat.MVC)
+        {
+            _logger.LogInformation("MVC decoding enabled for MVC content, forcing transcode path");
+            mediaSource.SupportsDirectPlay = false;
+            mediaSource.SupportsDirectStream = false;
+            mediaSource.SupportsTranscoding = true;
         }
 
         if (item is Audio)
@@ -304,13 +331,30 @@ public class MediaInfoHelper
                 {
                     mediaSource.TranscodingUrl += "&alwaysBurnInSubtitleWhenTranscoding=true";
                 }
+
+                if (enableAppleMediaProfile)
+                {
+                    mediaSource.TranscodingUrl += "&apmp=true";
+                }
+
+                if (enableMvcDecoding)
+                {
+                    mediaSource.TranscodingUrl += "&mvc=true";
+                }
             }
             else
             {
+                _logger.LogDebug(
+                    "TranscodingUrl check: SupportsDirectPlay={DirectPlay}, SupportsTranscoding={Transcoding}, SupportsDirectStream={DirectStream}",
+                    mediaSource.SupportsDirectPlay,
+                    mediaSource.SupportsTranscoding,
+                    mediaSource.SupportsDirectStream);
+
                 if (!mediaSource.SupportsDirectPlay && (mediaSource.SupportsTranscoding || mediaSource.SupportsDirectStream))
                 {
                     streamInfo.PlayMethod = PlayMethod.Transcode;
                     mediaSource.TranscodingUrl = streamInfo.ToUrl(null, claimsPrincipal.GetToken(), null);
+                    _logger.LogDebug("Generated TranscodingUrl: {Url}", mediaSource.TranscodingUrl);
 
                     if (!allowVideoStreamCopy)
                     {
@@ -325,6 +369,16 @@ public class MediaInfoHelper
                     if (streamInfo.AlwaysBurnInSubtitleWhenTranscoding)
                     {
                         mediaSource.TranscodingUrl += "&alwaysBurnInSubtitleWhenTranscoding=true";
+                    }
+
+                    if (enableAppleMediaProfile)
+                    {
+                        mediaSource.TranscodingUrl += "&apmp=true";
+                    }
+
+                    if (enableMvcDecoding)
+                    {
+                        mediaSource.TranscodingUrl += "&mvc=true";
                     }
                 }
             }

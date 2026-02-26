@@ -47,9 +47,9 @@ All three repos must be siblings:
 
 ```bash
 cd ~/Projects
-git clone https://github.com/jellyfin/jellyfin.git
+git clone https://github.com/matt953/jellyfin.git
 git clone https://github.com/jellyfin/jellyfin-web.git
-git clone https://github.com/jellyfin/jellyfin-ffmpeg.git
+git clone https://github.com/matt953/jellyfin-ffmpeg.git
 ```
 
 ### 2. Build ffmpeg toolchain images (one-time, ~30-60 min)

@@ -1560,8 +1560,9 @@ namespace MediaBrowser.Model.Dlna
                     continue;
                 }
 
+                // For HLS, allow both text subtitles and PGS subtitles (PGS will be OCR'd to VTT)
                 if ((profile.Method == SubtitleDeliveryMethod.External && subtitleStream.IsTextSubtitleStream == MediaStream.IsTextFormat(profile.Format)) ||
-                    (profile.Method == SubtitleDeliveryMethod.Hls && subtitleStream.IsTextSubtitleStream))
+                    (profile.Method == SubtitleDeliveryMethod.Hls && (subtitleStream.IsTextSubtitleStream || subtitleStream.IsPgsSubtitleStream)))
                 {
                     bool requiresConversion = !string.Equals(subtitleStream.Codec, profile.Format, StringComparison.OrdinalIgnoreCase);
 

@@ -73,6 +73,9 @@ cd builder && export PATH="/opt/ffbuild/bin:/opt/homebrew/opt/nasm@2/bin:$PATH" 
 
 # Extract the binaries
 cd artifacts && tar -xJf *.tar.xz
+
+or partial rebuild
+cd ~/Projects/jellyfin-ffmpeg && make -j$(sysctl -n hw.ncpu)
 ```
 
 ---

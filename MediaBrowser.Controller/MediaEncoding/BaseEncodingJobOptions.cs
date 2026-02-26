@@ -211,6 +211,14 @@ namespace MediaBrowser.Controller.MediaEncoding
         /// </summary>
         public bool EnableMultiAudioTracks { get; set; }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether to convert spatial video (180/360) to flat rectilinear output.
+        /// When true, applies crop and v360 filters to extract a flat view from spatial content.
+        /// This is used for trickplay and I-frame generation where flat images are required.
+        /// For normal playback, this should be false to pass through spatial content as-is.
+        /// </summary>
+        public bool EnableSpatialConversion { get; set; }
+
         public string GetOption(string qualifier, string name)
         {
             var value = GetOption(qualifier + "-" + name);

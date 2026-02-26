@@ -60,8 +60,9 @@ echo "Logs are being written to: $LOG_FILE"
 echo ""
 
 cd "$JELLYFIN_DIR"
-echo "Building with --no-incremental to ensure all DLLs are in sync..."
-dotnet build --no-incremental -c Debug > /dev/null 2>&1
+echo "Clean building to ensure all DLLs are in sync..."
+dotnet clean -c Debug > /dev/null 2>&1
+dotnet build -c Debug > /dev/null 2>&1
 echo "Build complete. Starting server..."
 dotnet run --project Jellyfin.Server --no-build -- \
     --webdir "$JELLYFIN_WEB_DIR" \
